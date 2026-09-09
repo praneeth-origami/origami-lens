@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Origami Lens</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <span class="brand-fold"></span>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">Origami Lens</span>
+          <span class="brand-tagline">Find what's wrong with any webpage.</span>
+        </div>
+      </div>
+      <a
+        id="header-dashboard-link"
+        class="icon-btn"
+        href="http://localhost:5173"
+        target="_blank"
+        rel="noreferrer"
+        aria-label="Open dashboard"
+        title="Open dashboard"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.25"/>
+          <rect x="9.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.25"/>
+          <rect x="1.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.25"/>
+          <rect x="9.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.25"/>
+        </svg>
+      </a>
+    </header>
+
+    <main class="app-main">
+      <!-- HOME -->
+      <section id="view-initial" class="view" aria-label="Home">
+        <div class="hero">
+          <h1 class="page-title">Website Health</h1>
+          <p class="page-subtitle">Analyze your website with confidence.</p>
+        </div>
+
+        <div class="site-card">
+          <span class="label">Current website</span>
+          <p id="current-site-host" class="site-host">—</p>
+          <p id="current-site-url" class="site-url truncate" title="">—</p>
+        </div>
+
+        <p class="section-label">What do you want to scan?</p>
+        <div class="option-cards">
+          <button id="current-page-btn" type="button" class="option-card">
+            <span class="option-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <circle cx="9" cy="9" r="6.5" stroke="currentColor" stroke-width="1.25"/>
+                <circle cx="9" cy="9" r="2" fill="currentColor"/>
+              </svg>
+            </span>
+            <span class="option-body">
+              <span class="option-title">Current Page</span>
+              <span class="option-desc">Analyze the page you're currently viewing.</span>
+            </span>
+            <span class="option-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="website-btn" type="button" class="option-card">
+            <span class="option-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <circle cx="9" cy="9" r="6.5" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M9 2.5v13M2.5 9h13" stroke="currentColor" stroke-width="1.25"/>
+              </svg>
+            </span>
+            <span class="option-body">
+              <span class="option-title">Entire Website</span>
+              <span class="option-desc">Discover and analyze multiple pages from this website.</span>
+            </span>
+            <span class="option-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="screenshot-to-code-btn" type="button" class="option-card">
+            <span class="option-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <rect x="2" y="3" width="14" height="10" rx="1.5" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M6 15.5h6M9 13v2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+                <path d="M5.5 9.5l2-2 1.5 1.5 3-3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="option-body">
+              <span class="option-title">Screenshot → Code</span>
+              <span class="option-desc">Select a component on the page and generate reusable code.</span>
+            </span>
+            <span class="option-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+
+        <div id="component-job-section" class="last-scan hidden">
+          <p class="section-label">Component generation</p>
+          <div class="last-scan-card">
+            <div class="last-scan-meta">
+              <span id="component-job-name" class="last-scan-host">Generating…</span>
+              <span id="component-job-status" class="last-scan-date">—</span>
+            </div>
+            <a id="component-job-link" class="btn btn-secondary btn-sm" href="#" target="_blank" rel="noreferrer">
+              View in dashboard
+            </a>
+          </div>
+        </div>
+
+        <div id="last-scan-section" class="last-scan hidden">
+          <p class="section-label">Recent scan</p>
+          <div class="last-scan-card">
+            <div class="last-scan-meta">
+              <span id="last-scan-host" class="last-scan-host">—</span>
+              <span id="last-scan-date" class="last-scan-date">—</span>
+            </div>
+            <div class="last-scan-stats">
+              <div class="mini-stat">
+                <span id="last-scan-score" class="mini-stat-value">—</span>
+                <span class="mini-stat-label">Health</span>
+              </div>
+              <div class="mini-stat">
+                <span id="last-scan-issues" class="mini-stat-value">—</span>
+                <span class="mini-stat-label">Issues</span>
+              </div>
+            </div>
+            <a id="resume-scan-link" class="btn btn-secondary btn-sm" href="#" target="_blank" rel="noreferrer">
+              View full report
+            </a>
+          </div>
+        </div>
+
+        <div id="empty-scan-section" class="empty-hint">
+          <p>Your first scan is waiting.</p>
+        </div>
+      </section>
+
+      <!-- WEBSITE CONFIG -->
+      <section id="view-website-config" class="view hidden" aria-label="Website scan configuration">
+        <button type="button" id="website-back-btn" class="back-link">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M8.5 3L4 7l4.5 4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Back
+        </button>
+        <h2 class="page-title">Scan entire website</h2>
+        <p class="page-subtitle">Discover and analyze multiple pages from this website.</p>
+
+        <form id="website-form" class="form-stack" novalidate>
+          <div class="field">
+            <label class="field-label" for="website-url">Website URL</label>
+            <input id="website-url" type="url" class="field-input" placeholder="https://example.com" required />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="discovery-method">Discovery</label>
+            <select id="discovery-method" class="field-input field-select">
+              <option value="AUTOMATIC">Automatic</option>
+              <option value="SITEMAP">Sitemap</option>
+              <option value="MANUAL">Manual URLs</option>
+            </select>
+          </div>
+
+          <div id="manual-urls-group" class="field hidden">
+            <label class="field-label" for="manual-urls">Manual URLs</label>
+            <textarea id="manual-urls" class="field-input field-textarea" rows="3" placeholder="/about&#10;/contact"></textarea>
+            <span class="field-hint">One URL or path per line</span>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="max-pages">Maximum pages</label>
+            <input id="max-pages" type="number" class="field-input" min="1" max="50" value="20" />
+          </div>
+
+          <button id="start-website-btn" type="submit" class="btn btn-primary">Start website scan</button>
+        </form>
+      </section>
+
+      <!-- CURRENT PAGE SCANNING -->
+      <section id="view-scanning" class="view hidden" aria-label="Scanning page">
+        <div class="scan-header">
+          <div class="spinner" role="status" aria-label="Scanning"></div>
+          <h2 id="scan-status-title" class="page-title">Scanning page</h2>
+          <p id="scanning-url" class="scan-url truncate">—</p>
+        </div>
+        <ul id="scan-steps" class="step-list" aria-live="polite">
+          <li data-step="collect"><span class="step-icon"></span>Collecting evidence</li>
+          <li data-step="performance"><span class="step-icon"></span>Analyzing page</li>
+          <li data-step="accessibility"><span class="step-icon"></span>Checking accessibility</li>
+          <li data-step="seo"><span class="step-icon"></span>Checking performance &amp; SEO</li>
+          <li data-step="security"><span class="step-icon"></span>Running security checks</li>
+          <li data-step="score"><span class="step-icon"></span>Generating report</li>
+        </ul>
+      </section>
+
+      <!-- WEBSITE SCANNING -->
+      <section id="view-website-progress" class="view hidden" aria-label="Website scan progress">
+        <div class="scan-header">
+          <div class="spinner" role="status" aria-label="Scanning website"></div>
+          <h2 class="page-title">Scanning website</h2>
+          <p id="website-scan-url" class="scan-url truncate">—</p>
+        </div>
+
+        <p id="website-progress-phase" class="progress-phase">Starting scan…</p>
+
+        <div class="progress-bar-wrap" aria-hidden="true">
+          <div id="website-progress-bar" class="progress-bar" style="width: 0%"></div>
+        </div>
+        <p id="website-progress-count" class="progress-count">0 / 0 pages scanned</p>
+
+        <ul id="website-page-list" class="page-progress-list" aria-live="polite"></ul>
+
+        <p id="website-progress-issues" class="progress-meta">Issues found: 0</p>
+      </section>
+
+      <!-- RESULTS -->
+      <section id="view-results" class="view hidden" aria-label="Scan complete">
+        <div class="complete-badge" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="9" stroke="currentColor" stroke-width="1.25"/>
+            <path d="M6 10l2.5 2.5L14 7" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2 class="page-title">Scan complete</h2>
+        <p id="results-url" class="scan-url truncate">—</p>
+        <p id="results-meta" class="results-meta hidden"></p>
+
+        <div class="score-ring-wrap">
+          <svg class="score-ring" viewBox="0 0 88 88" aria-hidden="true">
+            <circle class="score-ring-bg" cx="44" cy="44" r="38"/>
+            <circle id="score-ring-progress" class="score-ring-progress" cx="44" cy="44" r="38"/>
+          </svg>
+          <div class="score-ring-content">
+            <span id="overall-score" class="score-number">—</span>
+            <span class="score-label">Health score</span>
+            <span id="score-verdict" class="score-verdict">—</span>
+          </div>
+        </div>
+
+        <div id="category-scores" class="category-grid"></div>
+
+        <div class="issue-summary">
+          <p class="section-label">Issues found</p>
+          <div class="severity-grid">
+            <div class="severity-item critical">
+              <span class="severity-dot" aria-hidden="true"></span>
+              <span id="count-critical" class="severity-count">0</span>
+              <span class="severity-name">Critical</span>
+            </div>
+            <div class="severity-item high">
+              <span class="severity-dot" aria-hidden="true"></span>
+              <span id="count-high" class="severity-count">0</span>
+              <span class="severity-name">High</span>
+            </div>
+            <div class="severity-item medium">
+              <span class="severity-dot" aria-hidden="true"></span>
+              <span id="count-medium" class="severity-count">0</span>
+              <span class="severity-name">Medium</span>
+            </div>
+            <div class="severity-item low">
+              <span class="severity-dot" aria-hidden="true"></span>
+              <span id="count-low" class="severity-count">0</span>
+              <span class="severity-name">Low</span>
+            </div>
+          </div>
+          <p id="total-issues-label" class="total-issues">0 total issues</p>
+        </div>
+
+        <div id="issues-list" class="issues-preview"></div>
+
+        <div class="action-stack">
+          <a id="dashboard-link" class="btn btn-primary" href="http://localhost:5173/scans/" target="_blank" rel="noreferrer">
+            View full report
+          </a>
+          <button id="scan-again-btn" type="button" class="btn btn-secondary">Scan again</button>
+        </div>
+      </section>
+
+      <!-- ISSUE DETAIL -->
+      <section id="view-issue-detail" class="view hidden" aria-label="Issue details">
+        <button type="button" id="issue-back-btn" class="back-link">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M8.5 3L4 7l4.5 4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Back to results
+        </button>
+
+        <div class="issue-header">
+          <span id="issue-severity" class="severity-pill">—</span>
+          <span id="issue-category" class="category-pill">—</span>
+        </div>
+        <h2 id="issue-title" class="issue-title">—</h2>
+
+        <div class="detail-stack">
+          <article class="detail-card">
+            <h3>Problem</h3>
+            <p id="issue-problem"></p>
+          </article>
+          <article class="detail-card">
+            <h3>Cause</h3>
+            <p id="issue-cause"></p>
+          </article>
+          <article class="detail-card">
+            <h3>Impact</h3>
+            <p id="issue-impact"></p>
+          </article>
+          <article class="detail-card">
+            <h3>Suggested fix</h3>
+            <p id="issue-fix"></p>
+          </article>
+          <article class="detail-card">
+            <h3>Evidence</h3>
+            <pre id="issue-evidence"></pre>
+          </article>
+          <p id="issue-source" class="issue-source"></p>
+        </div>
+
+        <div class="ask-section">
+          <label class="field-label" for="ask-input">Ask AI</label>
+          <div class="ask-row">
+            <input id="ask-input" type="text" class="field-input" placeholder="Why is this happening?" />
+            <button id="ask-btn" type="button" class="btn btn-secondary btn-sm">Ask</button>
+          </div>
+          <p id="ask-response" class="ask-response" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <!-- ERROR -->
+      <section id="view-error" class="view hidden" aria-label="Error">
+        <div class="error-icon" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.25"/>
+            <path d="M12 7v6M12 16.5v.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2 class="page-title">Something went wrong</h2>
+        <p id="error-message" class="error-body">Origami Lens couldn't complete this scan.</p>
+        <p id="error-detail" class="error-detail hidden"></p>
+        <div class="action-stack">
+          <button id="retry-btn" type="button" class="btn btn-primary">Try again</button>
+          <button id="error-back-btn" type="button" class="btn btn-secondary">Back</button>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="popup/popup.js"></script>
+</body>
+</html>

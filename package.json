@@ -1,0 +1,28 @@
+{
+  "name": "origami-lens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Origami Lens — AI-powered webpage inspection platform",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "dev": "node scripts/dev.mjs",
+    "dev:all": "node scripts/dev.mjs --with-test-site",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:migrate": "pnpm --filter @origami/api db:migrate",
+    "db:setup": "docker compose up -d && pnpm db:migrate",
+    "dev:api": "pnpm --filter @origami/api dev",
+    "dev:scan-worker": "pnpm --filter @origami/api dev:scan-worker",
+    "dev:browser-worker": "pnpm --filter @origami/browser-worker dev",
+    "dev:ai-router": "pnpm --filter @origami/ai-router dev",
+    "dev:web": "pnpm --filter @origami/web dev",
+    "build:extension": "pnpm --filter @origami/extension build",
+    "build:web": "pnpm --filter @origami/web build",
+    "test": "pnpm -r run test",
+    "test:website": "pnpm --filter @origami/test-website serve"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

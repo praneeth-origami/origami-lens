@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Intentionally missing title for SEO test -->
+  <!-- Intentionally missing meta description -->
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; padding: 20px; }
+    .overflow-section {
+      width: 2000px;
+      background: #ffcccc;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    .large-image { width: 800px; }
+    button.empty-btn { padding: 4px; min-width: 20px; min-height: 20px; }
+    a.empty-link { color: blue; }
+    form { margin: 20px 0; }
+    input { display: block; margin: 8px 0; }
+    .http-resource { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Origami Lens Test Page</h1>
+  <h3>Subheading without h2 (poor heading structure)</h3>
+
+  <!-- Missing alt text -->
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" class="large-image" />
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" />
+
+  <!-- Empty button -->
+  <button class="empty-btn"></button>
+
+  <!-- Empty link -->
+  <a href="#" class="empty-link"></a>
+  <a href="javascript:void(0)">   </a>
+
+  <!-- Form without label -->
+  <form id="test-form">
+    <input type="text" name="username" placeholder="Username" />
+    <input type="email" name="email" />
+    <button type="submit">Submit</button>
+  </form>
+
+  <!-- Horizontal overflow -->
+  <div class="overflow-section">
+    This section is 2000px wide and will cause horizontal scrolling on most viewports.
+  </div>
+
+  <!-- Mixed content trigger (script reference) -->
+  <script src="http://example.com/insecure-script.js"></script>
+
+  <script>
+    // Console error
+    throw new Error('Origami test: intentional runtime error');
+
+    // Failed network request
+    fetch('/api/nonexistent-endpoint-origami-test').catch(() => {});
+
+    // Trigger 404
+    fetch('/missing-resource-origami-test-404');
+  </script>
+</body>
+</html>
