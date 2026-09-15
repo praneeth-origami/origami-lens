@@ -1,5 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import { useTheme, type ThemeMode } from '../hooks/useTheme';
+import { useAuth } from '../hooks/useAuth';
+import { githubLoginUrl } from '../api/client';
 
 function ThemeIcon({ mode }: { mode: ThemeMode }) {
   const common = { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
@@ -34,12 +36,14 @@ const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', end: true },
   { to: '/scans', label: 'Scans', end: false },
   { to: '/components', label: 'Components', end: false },
+  { to: '/repositories', label: 'Repositories', end: false },
 ];
 
 const THEME_OPTIONS: ThemeMode[] = ['light', 'dark', 'system'];
 
 export function TopNav() {
   const [themeMode, setThemeMode] = useTheme();
+  const { user, loading, logout } = useAuth();
 
   return (
     <header className="top-nav">
@@ -79,6 +83,22 @@ export function TopNav() {
                 <ThemeIcon mode={option} />
               </button>
             ))}
+          </div>
+
+          <div className="auth-status">
+            {loading ? null : user ? (
+              <>
+                {user.avatarUrl ? <img className="auth-avatar" src={user.avatarUrl} alt="" width={24} height={24} /> : null}
+                <span className="auth-name">{user.displayName ?? user.primaryProviderLogin}</span>
+                <button type="button" className="auth-signout" onClick={() => void logout()}>
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <a className="auth-signin" href={githubLoginUrl()}>
+                Sign in with GitHub
+              </a>
+            )}
           </div>
         </div>
       </div>
