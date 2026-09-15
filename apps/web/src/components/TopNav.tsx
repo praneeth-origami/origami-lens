@@ -74,6 +74,7 @@ export function TopNav() {
                 className={`theme-option ${themeMode === option ? 'active' : ''}`}
                 onClick={() => setThemeMode(option)}
                 aria-pressed={themeMode === option}
+                aria-label={option === 'system' ? 'System theme' : option === 'light' ? 'Light mode' : 'Dark mode'}
                 title={option === 'system' ? 'System theme' : option === 'light' ? 'Light mode' : 'Dark mode'}
               >
                 <ThemeIcon mode={option} />
