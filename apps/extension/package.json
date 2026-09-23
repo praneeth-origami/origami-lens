@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "dev": "node scripts/build.mjs --watch"
+    "build": "node init && node scripts/build.mjs",
+    "dev": "node init && node scripts/build.mjs --watch"
   },
   "dependencies": {
     "@origami/contracts": "workspace:*",

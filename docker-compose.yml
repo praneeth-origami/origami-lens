@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector's own image, built on the same postgres:16 base — required for
+    # Phase 4 (BGE-M3 embeddings + pgvector). Same Postgres major version as
+    # before, so the existing origami_pg_data volume is compatible as-is; the
+    # `vector` extension itself is enabled via migration 008, not here.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: origami
       POSTGRES_PASSWORD: origami
@@ -25,5 +29,72 @@ services:
       timeout: 3s
       retries: 5
 
+  # Phase 6 — bge-reranker-v2-m3, served by Hugging Face Text Embeddings
+  # Inference (TEI). Completely isolated from the `ollama` setup that serves
+  # chat/embedding models for this project (that Ollama instance is native
+  # to the host, not a compose service, and is untouched here) — Phase 5
+  # established that this project's Ollama installation cannot reliably
+  # serve this model's GGUF conversion (crashed llama-server). TEI natively
+  # supports cross-encoder rerankers and needs no such conversion.
+  #
+  # Image tag `86-1.8`: TEI ships separate images per GPU compute
+  # capability; `86` = Ampere compute capability 8.6 (this project's
+  # verified dev GPU: an RTX 3050 6GB laptop GPU). Pick a different suffix
+  # (`turing-*` for compute 7.5, `ampere-80-*` for A100, `hopper-*` for H100)
+  # to match different hardware — check with:
+  #   nvidia-smi --query-gpu=compute_cap --format=csv
+  # A CPU-only fallback image (`cpu-1.8`) also exists but was not used or
+  # benchmarked here, since a real GPU was available (bge-reranker-v2-m3 is
+  # a cross-encoder — CPU inference works but is much slower per query).
+  #
+  # AI_RERANKER_MODEL must be the exact Hugging Face repo id
+  # ("BAAI/bge-reranker-v2-m3"), not a short display name — TEI downloads
+  # the model directly from that repo into the `origami_reranker_data`
+  # volume (~2.2GB of FP32 safetensors weights, one-time download; verified
+  # live at ~385s over this environment's network, cached on every restart
+  # after that). AI_RERANKER_MAX_CLIENT_BATCH_SIZE must stay >=
+  # AI_RERANKER_MAX_CANDIDATES (apps/api's reranker candidate cap) — TEI's
+  # own default (32) rejects the whole batch with HTTP 413 otherwise
+  # (verified live: a 50-candidate batch failed against the default before
+  # this override; succeeded afterward). Phase 7: this relationship is no
+  # longer just documentation — services/ai-router/src/reranker-provider.ts's
+  # resolveRerankerConfig() validates it at AI Router startup and throws
+  # RerankerConfigurationError if AI_RERANKER_MAX_CANDIDATES ever exceeds
+  # this value, rather than letting search silently degrade to vector-only
+  # ranking. Requires the NVIDIA Container
+  # Toolkit already working for `docker run --gpus all` (verified via
+  # `nvidia-smi` inside a test container during Phase 6) — no changes were
+  # made to the existing `ollama` host setup, PostgreSQL volume, or Redis
+  # configuration to support this.
+  reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:86-1.8
+    command:
+      - "--model-id"
+      - "${AI_RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}"
+      - "--max-client-batch-size"
+      - "${AI_RERANKER_MAX_CLIENT_BATCH_SIZE:-64}"
+    ports:
+      - "8001:80"
+    volumes:
+      - origami_reranker_data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      # Generous: the model download (~2.2GB, first run only) plus GPU
+      # warmup took ~6 minutes end-to-end in this environment; subsequent
+      # restarts reuse the origami_reranker_data volume and are ready in
+      # under 20s (both verified live during Phase 6).
+      start_period: 420s
+
 volumes:
   origami_pg_data:
+  origami_reranker_data:
