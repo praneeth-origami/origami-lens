@@ -63,10 +63,17 @@ async function buildApp() {
   // Mirrors index.ts's real POST/GET /repositories and GET /repositories/:id
   // exactly: requireAuth preHandler, ownership derived only from
   // request.user.id, getByIdForUserAsync for the single-resource read.
+  // Phase 2 — mirrors index.ts's real resolveOrganizationIds: every user's
+  // organizationIds is just their own id in this no-Postgres harness (there
+  // is no organizations table without a real database), same convention
+  // UnifiedRepositoryStore.create() itself falls back to.
+  const resolveOrganizationIds = (userId: string) => [userId];
+
   app.post<{ Body: { repoUrl: string; branch?: string } }>('/repositories', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
     const repository = await repositoryStore.create({
       id: randomUUID(),
       userId: request.user!.id,
+      organizationId: resolveOrganizationIds(request.user!.id)[0],
       repoUrl: request.body.repoUrl,
       provider: 'GITHUB',
       branch: request.body.branch ?? 'main',
@@ -75,19 +82,25 @@ async function buildApp() {
   });
 
   app.get('/repositories', { preHandler: authMiddleware.requireAuth }, async (request) => {
-    return { repositories: await repositoryStore.listForUserAsync(request.user!.id) };
+    return { repositories: await repositoryStore.listForOrganizationsAsync(resolveOrganizationIds(request.user!.id)) };
   });
 
   app.get<{ Params: { id: string } }>('/repositories/:id', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
-    const repository = await repositoryStore.getByIdForUserAsync(request.params.id, request.user!.id);
+    const repository = await repositoryStore.getByIdForOrganizationsAsync(request.params.id, resolveOrganizationIds(request.user!.id));
     if (!repository) return reply.status(404).send({ error: 'Repository not found' });
     return repository;
+  });
+
+  app.delete<{ Params: { id: string } }>('/repositories/:id', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+    const deleted = await repositoryStore.deleteForOrganizationsAsync(request.params.id, resolveOrganizationIds(request.user!.id));
+    if (!deleted) return reply.status(404).send({ error: 'Repository not found' });
+    return { ok: true };
   });
 
   await app.listen({ port: 0, host: '127.0.0.1' });
   const address = app.server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
-  return { app, port, sessionRepo };
+  return { app, port, sessionRepo, repositoryStore };
 }
 
 function registerUser(sessionRepo: FakeSessionRepository, login: string): { sessionId: string; cookieHeader: string } {
@@ -206,6 +219,35 @@ describe('Phase 16/B — HTTP authentication + ownership (real requireAuth + rea
       const userAList = await fetch(`http://127.0.0.1:${port}/repositories`, { headers: { Cookie: userA.cookieHeader } });
       const { repositories } = (await userAList.json()) as { repositories: unknown[] };
       assert.equal(repositories.length, 0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('IDOR — User B cannot delete User A\'s repository (404, not deleted), and User A can still delete their own afterward', async () => {
+    const { app, port, sessionRepo } = await buildApp();
+    try {
+      const userA = registerUser(sessionRepo, 'user-a');
+      const userB = registerUser(sessionRepo, 'user-b');
+
+      const createRes = await fetch(`http://127.0.0.1:${port}/repositories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: userA.cookieHeader },
+        body: JSON.stringify({ repoUrl: 'https://github.com/facebook/react' }),
+      });
+      const created = (await createRes.json()) as { id: string };
+
+      const deleteByB = await fetch(`http://127.0.0.1:${port}/repositories/${created.id}`, { method: 'DELETE', headers: { Cookie: userB.cookieHeader } });
+      assert.equal(deleteByB.status, 404);
+
+      const stillThere = await fetch(`http://127.0.0.1:${port}/repositories/${created.id}`, { headers: { Cookie: userA.cookieHeader } });
+      assert.equal(stillThere.status, 200, 'the repository must survive an attempted delete by a non-owner');
+
+      const deleteByA = await fetch(`http://127.0.0.1:${port}/repositories/${created.id}`, { method: 'DELETE', headers: { Cookie: userA.cookieHeader } });
+      assert.equal(deleteByA.status, 200);
+
+      const goneNow = await fetch(`http://127.0.0.1:${port}/repositories/${created.id}`, { headers: { Cookie: userA.cookieHeader } });
+      assert.equal(goneNow.status, 404);
     } finally {
       await app.close();
     }

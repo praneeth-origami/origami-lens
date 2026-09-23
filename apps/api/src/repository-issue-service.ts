@@ -24,6 +24,7 @@ export interface RepositoryLike {
   id: string;
   ownerId?: string;
   userId?: string;
+  organizationId?: string;
   status: string;
 }
 
@@ -92,7 +93,7 @@ export async function createRepositoryIssue(
   if (!repository) {
     throw new IssueError('Repository not found.', 'REPOSITORY_NOT_FOUND');
   }
-  if (!canAccessRepository(repository.userId, params.ownerId)) {
+  if (!canAccessRepository(repository.organizationId, params.ownerId)) {
     throw new IssueError('Repository not found.', 'REPOSITORY_ACCESS_DENIED');
   }
   if (NOT_YET_INDEXED_STATUSES.has(repository.status)) {
@@ -169,7 +170,7 @@ export async function getRepositoryIssue(
   issueId: string,
   requestOwnerId: string | undefined,
 ): Promise<RepositoryIssue> {
-  if (!repository || !canAccessRepository(repository.userId, requestOwnerId)) {
+  if (!repository || !canAccessRepository(repository.organizationId, requestOwnerId)) {
     throw new IssueError('Repository not found.', 'REPOSITORY_NOT_FOUND');
   }
   const issue = await stores.issueStore.getByIdAsync(issueId);
@@ -184,7 +185,7 @@ export async function listRepositoryIssues(
   stores: Pick<IssueStores, 'issueStore'>,
   requestOwnerId: string | undefined,
 ): Promise<RepositoryIssue[]> {
-  if (!repository || !canAccessRepository(repository.userId, requestOwnerId)) {
+  if (!repository || !canAccessRepository(repository.organizationId, requestOwnerId)) {
     throw new IssueError('Repository not found.', 'REPOSITORY_NOT_FOUND');
   }
   return stores.issueStore.listForRepositoryAsync(repository.id);

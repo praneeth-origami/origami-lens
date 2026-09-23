@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import type { Repository, RepositoryAskResponse, RepositoryIssue, RepositoryIssueSeverity, RepositorySearchResponse } from '@origami/contracts';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { createPortal } from 'react-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import type { Repository, RepositoryAskResponse, RepositoryIssue, RepositoryIssueSeverity, RepositorySearchResponse, RepositoryStatus } from '@origami/contracts';
 import {
   askRepository,
   cancelRepositoryClone,
@@ -8,6 +9,7 @@ import {
   cancelRepositoryIndex,
   cloneRepository,
   createRepositoryIssue,
+  deleteRepository,
   embedRepository,
   fetchCloneStatus,
   fetchEmbedStatus,
@@ -24,54 +26,108 @@ import {
 } from '../api/client';
 import { HealthBanner } from '../components/HealthBanner';
 import { ErrorState, LoadingSkeleton } from '../components/StateViews';
+import { AnimatedProgressBar } from '../components/AnimatedProgressBar';
+import {
+  GitHubIcon,
+  GitLabIcon,
+  BitbucketIcon,
+  GitBranchIcon,
+  MoreIcon,
+  ExternalLinkIcon,
+  TrashIcon,
+  DownloadIcon,
+  ListIcon,
+  SparkleIcon,
+  SearchIcon,
+  MessageIcon,
+  FolderIcon,
+  BookIcon,
+  DocumentIcon,
+  DatabaseIcon,
+  CubeIcon,
+  CheckCircleIcon,
+  ClockIcon,
+  AlertTriangleIcon,
+  ArrowRightIcon,
+} from '../components/icons';
+import { lensEvent } from '../notifications/lens-event';
+import { confirm } from '../notifications/confirm';
+import { useWorkspaceRole } from '../hooks/useWorkspaceRole';
+import { canConfigureRepository, canRunScanOrAI } from '../utils/workspace-permissions';
 
-const PROVIDER_LABEL: Record<Repository['provider'], string> = {
-  GITHUB: 'GitHub',
-  GITLAB: 'GitLab',
-  BITBUCKET: 'Bitbucket',
+const PROVIDER_LABEL: Record<Repository['provider'], string> = { GITHUB: 'GitHub', GITLAB: 'GitLab', BITBUCKET: 'Bitbucket' };
+const PROVIDER_ICON: Record<Repository['provider'], ComponentType> = { GITHUB: GitHubIcon, GITLAB: GitLabIcon, BITBUCKET: BitbucketIcon };
+
+type StageTone = 'ready' | 'processing' | 'pending' | 'failed' | 'inactive';
+interface StageMeta { label: string; tone: StageTone; }
+
+const STATUS_META: Record<RepositoryStatus, StageMeta> = {
+  CONNECTED: { label: 'Connected', tone: 'pending' },
+  DISCONNECTED: { label: 'Disconnected', tone: 'inactive' },
+  CLONING: { label: 'Cloning', tone: 'processing' },
+  READY_FOR_INDEXING: { label: 'Ready for indexing', tone: 'pending' },
+  FAILED: { label: 'Failed', tone: 'failed' },
+  INDEXING: { label: 'Indexing', tone: 'processing' },
+  READY_FOR_SEARCH: { label: 'Ready for search', tone: 'pending' },
+  EMBEDDING: { label: 'Embedding', tone: 'processing' },
+  EMBEDDINGS_READY: { label: 'Embeddings ready', tone: 'ready' },
 };
 
-const STATUS_LABEL: Record<Repository['status'], string> = {
-  CONNECTED: 'Connected',
-  DISCONNECTED: 'Disconnected',
-  CLONING: 'Cloning',
-  READY_FOR_INDEXING: 'Ready for indexing',
-  FAILED: 'Failed',
-  INDEXING: 'Indexing',
-  READY_FOR_SEARCH: 'Ready for search',
-  EMBEDDING: 'Embedding',
-  EMBEDDINGS_READY: 'Embeddings ready',
+const CLONE_STAGE_META: Record<RepositoryCloneStatusResponse['status'], StageMeta> = {
+  QUEUED: { label: 'Queued', tone: 'pending' },
+  RUNNING: { label: 'Cloning…', tone: 'processing' },
+  COMPLETED: { label: 'Completed', tone: 'ready' },
+  FAILED: { label: 'Failed', tone: 'failed' },
+  CANCELLED: { label: 'Cancelled', tone: 'inactive' },
+  TIMED_OUT: { label: 'Timed out', tone: 'failed' },
 };
 
-/** User-facing label for the clone job's own lifecycle — distinct from (and shown alongside) the repository's own status above. */
-const CLONE_STATUS_LABEL: Record<RepositoryCloneStatusResponse['status'], string> = {
-  QUEUED: 'Queued',
-  RUNNING: 'Cloning…',
-  COMPLETED: 'Ready for indexing',
-  FAILED: 'Failed',
-  CANCELLED: 'Cancelled',
-  TIMED_OUT: 'Timed out',
+const INDEX_STAGE_META: Record<RepositoryIndexStatusResponse['status'], StageMeta> = {
+  QUEUED: { label: 'Queued', tone: 'pending' },
+  RUNNING: { label: 'Indexing…', tone: 'processing' },
+  COMPLETED: { label: 'Completed', tone: 'ready' },
+  FAILED: { label: 'Failed', tone: 'failed' },
+  CANCELLED: { label: 'Cancelled', tone: 'inactive' },
 };
 
-const INDEX_STATUS_LABEL: Record<RepositoryIndexStatusResponse['status'], string> = {
-  QUEUED: 'Queued',
-  RUNNING: 'Indexing…',
-  COMPLETED: 'Ready for Search',
-  FAILED: 'Failed',
-  CANCELLED: 'Cancelled',
+const EMBED_STAGE_META: Record<RepositoryEmbeddingStatusResponse['status'], StageMeta> = {
+  QUEUED: { label: 'Queued', tone: 'pending' },
+  RUNNING: { label: 'Embedding…', tone: 'processing' },
+  COMPLETED: { label: 'Completed', tone: 'ready' },
+  FAILED: { label: 'Failed', tone: 'failed' },
+  CANCELLED: { label: 'Cancelled', tone: 'inactive' },
 };
 
-const EMBED_STATUS_LABEL: Record<RepositoryEmbeddingStatusResponse['status'], string> = {
-  QUEUED: 'Queued',
-  RUNNING: 'Embedding…',
-  COMPLETED: 'Embeddings Ready',
-  FAILED: 'Failed',
-  CANCELLED: 'Cancelled',
-};
+const NOT_STARTED_META: StageMeta = { label: 'Not started', tone: 'inactive' };
+const WAITING_META: StageMeta = { label: 'Waiting', tone: 'inactive' };
+const READY_META: StageMeta = { label: 'Ready', tone: 'ready' };
 
 const CLONE_IN_PROGRESS = new Set(['QUEUED', 'RUNNING']);
 const INDEX_IN_PROGRESS = new Set(['QUEUED', 'RUNNING']);
 const EMBED_IN_PROGRESS = new Set(['QUEUED', 'RUNNING']);
+
+const SEVERITY_BADGE_CLASS: Record<RepositoryIssueSeverity, string> = {
+  CRITICAL: 'critical',
+  HIGH: 'high',
+  MEDIUM: 'medium',
+  LOW: 'low',
+};
+
+const STRUCTURE_PREVIEW_LIMIT = 10;
+
+const SEARCH_SUGGESTIONS = [
+  'Where is authentication handled?',
+  'How are API requests structured?',
+  'Where is the database configured?',
+  'How does the application handle errors?',
+];
+
+const ASK_SUGGESTIONS = [
+  'What does this repository do?',
+  'How is the health score calculated?',
+  'Where should I start reading the code?',
+  'What are the main entry points?',
+];
 
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -89,6 +145,14 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function repoName(repoUrl: string): string {
+  try {
+    return new URL(repoUrl).pathname.replace(/^\//, '');
+  } catch {
+    return repoUrl;
+  }
+}
+
 const LANGUAGE_LABEL: Record<string, string> = {
   typescript: 'TypeScript',
   tsx: 'TSX',
@@ -104,11 +168,157 @@ const LANGUAGE_LABEL: Record<string, string> = {
   json: 'JSON',
 };
 
+interface ActionItem {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  destructive?: boolean;
+}
+
+/** Portal-based "•••" menu, same pattern used across this session's redesigns — this page's root also sits inside `.animate-in`, which traps position:fixed descendants unless portaled. */
+function RowActionsMenu({ items, ariaLabel, busy }: { items: ActionItem[]; ariaLabel: string; busy?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; right: number } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const updatePosition = () => {
+      const rect = triggerRef.current!.getBoundingClientRect();
+      setPosition({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+    };
+    updatePosition();
+    const handleLayoutChange = () => setOpen(false);
+    window.addEventListener('scroll', handleLayoutChange, true);
+    window.addEventListener('resize', handleLayoutChange);
+    return () => {
+      window.removeEventListener('scroll', handleLayoutChange, true);
+      window.removeEventListener('resize', handleLayoutChange);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (containerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="repo-actions-menu-container" ref={containerRef}>
+      <button
+        type="button"
+        ref={triggerRef}
+        className="repo-actions-trigger repo-detail-more-trigger"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+      >
+        <MoreIcon />
+      </button>
+
+      {open && position &&
+        createPortal(
+          <div ref={menuRef} className="repo-actions-menu" role="menu" aria-label={ariaLabel} style={{ position: 'fixed', top: position.top, right: position.right }}>
+            {items.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                role="menuitem"
+                disabled={item.disabled}
+                className={`repo-actions-menu-item ${item.destructive ? 'destructive' : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpen(false);
+                  item.onClick();
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}
+
+interface PipelineStageAction {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
+  variant?: 'primary' | 'ghost';
+}
+
+function PipelineStage({ icon: Icon, label, meta, timestamp, hint, action }: {
+  icon: ComponentType;
+  label: string;
+  meta: StageMeta;
+  timestamp?: string;
+  hint?: string;
+  action?: PipelineStageAction | null;
+}) {
+  return (
+    <div className="repo-pipeline-stage">
+      <span className={`repo-pipeline-stage-icon ${meta.tone}`} aria-hidden="true"><Icon /></span>
+      <div className="repo-pipeline-stage-body">
+        <span className="repo-pipeline-stage-label">{label}</span>
+        <span className={`repo-pipeline-stage-status ${meta.tone}`}>{meta.label}</span>
+        {timestamp && <span className="repo-pipeline-stage-timestamp">{formatDateTime(timestamp)}</span>}
+        {hint && <span className="repo-pipeline-stage-hint">{hint}</span>}
+      </div>
+      {action && (
+        <button
+          type="button"
+          className={action.variant === 'primary' ? 'primary-button repo-pipeline-stage-action' : 'ghost-button repo-pipeline-stage-action'}
+          onClick={action.onClick}
+          disabled={action.disabled}
+          title={action.disabledReason}
+        >
+          {action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PipelineArrow() {
+  return <span className="repo-pipeline-arrow" aria-hidden="true"><ArrowRightIcon /></span>;
+}
+
 export function RepositoryDetailPage() {
   const { id } = useParams();
+  const navigate = useNavigate();
+  const { role } = useWorkspaceRole();
+  const canConfigure = canConfigureRepository(role);
+  const canAskAI = canRunScanOrAI(role);
+
   const [repository, setRepository] = useState<Repository | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingRepo, setDeletingRepo] = useState(false);
 
   const [cloneStatus, setCloneStatus] = useState<RepositoryCloneStatusResponse | null>(null);
   const [cloneActionError, setCloneActionError] = useState<string | null>(null);
@@ -126,6 +336,8 @@ export function RepositoryDetailPage() {
   const [startingEmbed, setStartingEmbed] = useState(false);
   const [cancellingEmbed, setCancellingEmbed] = useState(false);
 
+  const [intelMode, setIntelMode] = useState<'search' | 'ask'>('search');
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResponse, setSearchResponse] = useState<RepositorySearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
@@ -137,6 +349,8 @@ export function RepositoryDetailPage() {
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
   const [hasAsked, setHasAsked] = useState(false);
+
+  const [structureExpanded, setStructureExpanded] = useState(false);
 
   const [issues, setIssues] = useState<RepositoryIssue[]>([]);
   const [loadingIssues, setLoadingIssues] = useState(false);
@@ -162,42 +376,93 @@ export function RepositoryDetailPage() {
 
   useEffect(load, [id]);
 
+  // Tracks each job's own Lens Active card + last-seen status, so the
+  // active->complete morph fires only on a REAL in-progress -> terminal
+  // transition observed during this page visit — never for a job that was
+  // already terminal on the very first load. No progress field exists for
+  // any of these three job types today (unlike website scans), so their
+  // cards stay indeterminate the whole time — never a fabricated percentage.
+  const cloneStatusRef = useRef<string | undefined>(undefined);
+  const indexStatusRef = useRef<string | undefined>(undefined);
+  const embedStatusRef = useRef<string | undefined>(undefined);
+  const cloneEventIdRef = useRef<string | null>(null);
+  const indexEventIdRef = useRef<string | null>(null);
+  const embedEventIdRef = useRef<string | null>(null);
+
+  const repoResource = repository ? repoName(repository.repoUrl) : undefined;
+
   const loadCloneStatus = useCallback(async () => {
     if (!id) return;
     try {
-      setCloneStatus(await fetchCloneStatus(id));
+      const status = await fetchCloneStatus(id);
+      setCloneStatus(status);
+      const wasInProgress = cloneStatusRef.current !== undefined && CLONE_IN_PROGRESS.has(cloneStatusRef.current);
+      const nowInProgress = CLONE_IN_PROGRESS.has(status.status);
+      if (nowInProgress && !cloneEventIdRef.current) {
+        cloneEventIdRef.current = lensEvent.active({ title: 'Cloning repository', resource: repoResource });
+      } else if (wasInProgress && !nowInProgress && cloneEventIdRef.current) {
+        const eventId = cloneEventIdRef.current;
+        cloneEventIdRef.current = null;
+        if (status.status === 'COMPLETED') lensEvent.complete(eventId, { type: 'success', title: 'Repository cloned', resource: repoResource });
+        else if (status.status === 'FAILED') lensEvent.complete(eventId, { type: 'error', title: 'Repository clone failed', resource: repoResource });
+        else if (status.status === 'CANCELLED') lensEvent.complete(eventId, { type: 'warning', title: 'Repository clone cancelled', resource: repoResource });
+        else if (status.status === 'TIMED_OUT') lensEvent.complete(eventId, { type: 'error', title: 'Repository clone timed out', resource: repoResource, detail: 'Please try again.' });
+      }
+      cloneStatusRef.current = status.status;
     } catch {
-      // No clone job exists yet (404) — leave cloneStatus as null, rendered as "Not cloned".
       setCloneStatus(null);
     }
-  }, [id]);
+  }, [id, repoResource]);
 
   const loadIndexStatus = useCallback(async () => {
     if (!id) return;
     try {
       const status = await fetchIndexStatus(id);
       setIndexStatus(status);
+      const wasInProgress = indexStatusRef.current !== undefined && INDEX_IN_PROGRESS.has(indexStatusRef.current);
+      const nowInProgress = INDEX_IN_PROGRESS.has(status.status);
+      if (nowInProgress && !indexEventIdRef.current) {
+        indexEventIdRef.current = lensEvent.active({ title: 'Indexing repository', resource: repoResource });
+      } else if (wasInProgress && !nowInProgress && indexEventIdRef.current) {
+        const eventId = indexEventIdRef.current;
+        indexEventIdRef.current = null;
+        if (status.status === 'COMPLETED') lensEvent.complete(eventId, { type: 'success', title: 'Repository indexing completed', resource: repoResource });
+        else if (status.status === 'FAILED') lensEvent.complete(eventId, { type: 'error', title: 'Repository indexing failed', resource: repoResource });
+        else if (status.status === 'CANCELLED') lensEvent.complete(eventId, { type: 'warning', title: 'Repository indexing cancelled', resource: repoResource });
+      }
+      indexStatusRef.current = status.status;
       if (status.status === 'COMPLETED') {
         setIndexSummary(await fetchIndexSummary(id).catch(() => null));
       } else {
         setIndexSummary(null);
       }
     } catch {
-      // No index job exists yet (404) — leave indexStatus as null.
       setIndexStatus(null);
       setIndexSummary(null);
     }
-  }, [id]);
+  }, [id, repoResource]);
 
   const loadEmbedStatus = useCallback(async () => {
     if (!id) return;
     try {
-      setEmbedStatus(await fetchEmbedStatus(id));
+      const status = await fetchEmbedStatus(id);
+      setEmbedStatus(status);
+      const wasInProgress = embedStatusRef.current !== undefined && EMBED_IN_PROGRESS.has(embedStatusRef.current);
+      const nowInProgress = EMBED_IN_PROGRESS.has(status.status);
+      if (nowInProgress && !embedEventIdRef.current) {
+        embedEventIdRef.current = lensEvent.active({ title: 'Embedding repository', resource: repoResource });
+      } else if (wasInProgress && !nowInProgress && embedEventIdRef.current) {
+        const eventId = embedEventIdRef.current;
+        embedEventIdRef.current = null;
+        if (status.status === 'COMPLETED') lensEvent.complete(eventId, { type: 'success', title: 'Repository embeddings ready', resource: repoResource });
+        else if (status.status === 'FAILED') lensEvent.complete(eventId, { type: 'error', title: 'Repository embedding failed', resource: repoResource });
+        else if (status.status === 'CANCELLED') lensEvent.complete(eventId, { type: 'warning', title: 'Repository embedding cancelled', resource: repoResource });
+      }
+      embedStatusRef.current = status.status;
     } catch {
-      // No embedding job exists yet (404) — leave embedStatus as null.
       setEmbedStatus(null);
     }
-  }, [id]);
+  }, [id, repoResource]);
 
   const loadIssues = useCallback(async () => {
     if (!id) return;
@@ -328,6 +593,26 @@ export function RepositoryDetailPage() {
     }
   };
 
+  const handleDeleteRepository = async () => {
+    if (!id || !repository || deletingRepo) return;
+    const confirmed = await confirm({
+      title: 'Delete repository?',
+      description: `Delete ${repoName(repository.repoUrl)}? This also removes its indexing/embedding data and clone workspace. This cannot be undone.`,
+      confirmText: 'Delete',
+      destructive: true,
+    });
+    if (!confirmed) return;
+    setDeletingRepo(true);
+    try {
+      await deleteRepository(id);
+      lensEvent.success('Repository deleted', { resource: repoName(repository.repoUrl) });
+      navigate('/repositories');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete repository');
+      setDeletingRepo(false);
+    }
+  };
+
   const handleCreateIssue = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!id || creatingIssue) return;
@@ -361,18 +646,12 @@ export function RepositoryDetailPage() {
     }
   };
 
-  const handleSearch = async (event?: React.FormEvent) => {
-    event?.preventDefault();
+  const runSearch = async (query: string) => {
     if (!id || searching) return;
-    const trimmed = searchQuery.trim();
-    if (!trimmed) {
-      setSearchError('Enter a search query.');
-      return;
-    }
     setSearching(true);
     setSearchError(null);
     try {
-      const response = await searchRepository(id, trimmed);
+      const response = await searchRepository(id, query);
       setSearchResponse(response);
       setHasSearched(true);
     } catch (err) {
@@ -384,18 +663,27 @@ export function RepositoryDetailPage() {
     }
   };
 
-  const handleAsk = async (event?: React.FormEvent) => {
+  const handleSearch = async (event?: React.FormEvent) => {
     event?.preventDefault();
-    if (!id || asking) return;
-    const trimmed = askQuery.trim();
+    const trimmed = searchQuery.trim();
     if (!trimmed) {
-      setAskError('Enter a question.');
+      setSearchError('Enter a search query.');
       return;
     }
+    await runSearch(trimmed);
+  };
+
+  const handleSuggestedSearch = (q: string) => {
+    setSearchQuery(q);
+    void runSearch(q);
+  };
+
+  const runAsk = async (query: string) => {
+    if (!id || asking) return;
     setAsking(true);
     setAskError(null);
     try {
-      const response = await askRepository(id, trimmed);
+      const response = await askRepository(id, query);
       setAskResponse(response);
       setHasAsked(true);
     } catch (err) {
@@ -407,9 +695,30 @@ export function RepositoryDetailPage() {
     }
   };
 
+  const handleAsk = async (event?: React.FormEvent) => {
+    event?.preventDefault();
+    const trimmed = askQuery.trim();
+    if (!trimmed) {
+      setAskError('Enter a question.');
+      return;
+    }
+    await runAsk(trimmed);
+  };
+
+  const handleSuggestedAsk = (q: string) => {
+    setAskQuery(q);
+    void runAsk(q);
+  };
+
+  const severityCounts = useMemo(() => {
+    const counts: Record<RepositoryIssueSeverity, number> = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
+    for (const issue of issues) counts[issue.severity] += 1;
+    return counts;
+  }, [issues]);
+
   if (loading) {
     return (
-      <div className="dashboard">
+      <div className="dashboard repository-detail-page">
         <LoadingSkeleton />
       </div>
     );
@@ -417,7 +726,7 @@ export function RepositoryDetailPage() {
 
   if (error || !repository) {
     return (
-      <div className="dashboard">
+      <div className="dashboard repository-detail-page">
         <ErrorState message={error ?? 'Repository not found'} onRetry={load} />
         <Link to="/repositories" className="back-link">← Back to Repositories</Link>
       </div>
@@ -430,447 +739,412 @@ export function RepositoryDetailPage() {
   const indexReady = indexStatus?.status === 'COMPLETED';
   const embedInProgress = Boolean(embedStatus && EMBED_IN_PROGRESS.has(embedStatus.status));
   const embedReady = embedStatus?.status === 'COMPLETED';
+  const ProviderIcon = PROVIDER_ICON[repository.provider];
+  const notConfigureReason = 'Only workspace owners and admins can do this.';
+
+  const topDirs = cloneStatus?.topLevelDirectories ?? [];
+  const topFiles = cloneStatus?.topLevelFiles ?? [];
+  const allTopLevel = [
+    ...topDirs.map((d) => ({ type: 'dir' as const, name: d })),
+    ...topFiles.map((f) => ({ type: 'file' as const, name: f })),
+  ];
+  const visibleTopLevel = structureExpanded ? allTopLevel : allTopLevel.slice(0, STRUCTURE_PREVIEW_LIMIT);
+
+  const languageEntries = indexSummary ? Object.entries(indexSummary.languages).sort(([, a], [, b]) => b - a) : [];
+  const languageTotal = languageEntries.reduce((sum, [, c]) => sum + c, 0);
 
   return (
-    <div className="dashboard repository-detail-page">
+    <div className="dashboard repository-detail-page animate-in">
       <Link to="/repositories" className="back-link">← Back to Repositories</Link>
 
-      <header className="issue-detail-header">
-        <span className="category-pill">{PROVIDER_LABEL[repository.provider]}</span>
-        <h1>{repository.repoUrl}</h1>
-        <div className="detail-tags">
-          <a href={repository.repoUrl} target="_blank" rel="noreferrer">{repository.repoUrl}</a>
-          <span>Branch: {repository.branch}</span>
+      <div className="component-header repo-detail-header">
+        <div className="component-header-identity">
+          <span className="component-header-icon repo-detail-provider-icon" aria-hidden="true"><ProviderIcon /></span>
+          <div>
+            <div className="page-eyebrow">{PROVIDER_LABEL[repository.provider]}</div>
+            <h1>{repoName(repository.repoUrl)}</h1>
+            <div className="detail-tags repo-detail-tags">
+              <a href={repository.repoUrl} target="_blank" rel="noreferrer">{repository.repoUrl}</a>
+              <span className="repo-detail-branch"><GitBranchIcon /> {repository.branch}</span>
+              {cloneStatus?.commitSha && <span className="repo-detail-commit">{cloneStatus.commitSha.slice(0, 7)}</span>}
+              <span className={`repo-status-pill ${STATUS_META[repository.status].tone}`}>
+                <span className="repo-status-dot" aria-hidden="true" />
+                {STATUS_META[repository.status].label}
+              </span>
+            </div>
+          </div>
         </div>
-      </header>
 
-      <div className="repository-meta-grid">
-        <div className="repository-meta-item">
-          <span className="repository-meta-label">Provider</span>
-          <span className="repository-meta-value">{PROVIDER_LABEL[repository.provider]}</span>
-        </div>
-        <div className="repository-meta-item">
-          <span className="repository-meta-label">Repository URL</span>
-          <span className="repository-meta-value">{repository.repoUrl}</span>
-        </div>
-        <div className="repository-meta-item">
-          <span className="repository-meta-label">Branch</span>
-          <span className="repository-meta-value">{repository.branch}</span>
-        </div>
-        <div className="repository-meta-item">
-          <span className="repository-meta-label">Status</span>
-          <span className="repository-meta-value">
-            <span className={`activity-status-dot ${repository.status.toLowerCase()}`} aria-hidden="true" />{' '}
-            {STATUS_LABEL[repository.status]}
-          </span>
-        </div>
-        <div className="repository-meta-item">
-          <span className="repository-meta-label">Created</span>
-          <span className="repository-meta-value">{formatDateTime(repository.createdAt)}</span>
-        </div>
-        <div className="repository-meta-item">
-          <span className="repository-meta-label">Updated</span>
-          <span className="repository-meta-value">{formatDateTime(repository.updatedAt)}</span>
+        <div className="component-header-actions">
+          <button type="button" className="ghost-button" onClick={() => window.open(repository.repoUrl, '_blank', 'noopener,noreferrer')}>
+            <ExternalLinkIcon /> Open Repository
+          </button>
+          <RowActionsMenu
+            ariaLabel="Repository actions"
+            busy={deletingRepo}
+            items={[
+              {
+                label: 'Delete repository',
+                destructive: true,
+                disabled: !canConfigure || deletingRepo,
+                onClick: () => void handleDeleteRepository(),
+              },
+            ]}
+          />
         </div>
       </div>
 
-      <section className="repository-clone-section">
-        <div className="repository-clone-header">
+      <section className="repo-pipeline-section">
+        <div className="repo-panel-header">
+          <span className="repo-panel-icon" aria-hidden="true"><SparkleIcon /></span>
           <div>
-            <span className="section-title">Repository Clone</span>
-            <p className="repository-clone-state">
-              {cloneStatus ? CLONE_STATUS_LABEL[cloneStatus.status] : 'Not cloned'}
-            </p>
-          </div>
-          <div className="repository-clone-actions">
-            {cloneInProgress ? (
-              <button type="button" className="ghost-button" onClick={handleCancelClone} disabled={cancelling}>
-                {cancelling ? 'Cancelling…' : 'Cancel Clone'}
-              </button>
-            ) : (
-              <button type="button" className="primary-button" onClick={handleStartClone} disabled={starting}>
-                {starting ? 'Starting…' : cloneStatus ? 'Clone Again' : 'Clone Repository'}
-              </button>
-            )}
+            <h2>Repository Intelligence Pipeline</h2>
+            <p>From code to insights — your repository is ready for AI analysis.</p>
           </div>
         </div>
 
         {cloneActionError && <p className="connect-repo-error" role="alert">{cloneActionError}</p>}
+        {indexActionError && <p className="connect-repo-error" role="alert">{indexActionError}</p>}
+        {embedActionError && <p className="connect-repo-error" role="alert">{embedActionError}</p>}
 
-        {cloneInProgress && (
-          <div className="repository-clone-progress">
-            <div className="spinner-inline" aria-hidden="true" />
-            <p className="muted">
-              {cloneStatus?.status === 'QUEUED' ? 'Waiting for a worker to pick up this clone…' : 'Cloning and inspecting the repository…'}
-            </p>
-          </div>
-        )}
-
-        {cloneStatus?.status === 'FAILED' && (
-          <HealthBanner variant="error" role="alert">{cloneStatus.error ?? 'Clone failed.'}</HealthBanner>
-        )}
-
-        {cloneStatus?.status === 'TIMED_OUT' && (
-          <HealthBanner variant="error" role="alert">{cloneStatus.error ?? 'Clone timed out.'}</HealthBanner>
-        )}
-
-        {cloneStatus?.status === 'CANCELLED' && (
-          <HealthBanner variant="warning">Clone cancelled.</HealthBanner>
-        )}
-
-        {cloneReady && (
-          <div className="repository-discovery">
-            {!indexReady && <HealthBanner variant="ok">Repository ready for indexing.</HealthBanner>}
-
-            <div className="repository-meta-grid">
-              <div className="repository-meta-item">
-                <span className="repository-meta-label">Commit</span>
-                <span className="repository-meta-value repository-commit-sha">{cloneStatus.commitSha}</span>
-              </div>
-              <div className="repository-meta-item">
-                <span className="repository-meta-label">Files</span>
-                <span className="repository-meta-value">{cloneStatus.fileCount}</span>
-              </div>
-              <div className="repository-meta-item">
-                <span className="repository-meta-label">Directories</span>
-                <span className="repository-meta-value">{cloneStatus.directoryCount}</span>
-              </div>
-              <div className="repository-meta-item">
-                <span className="repository-meta-label">Repository size</span>
-                <span className="repository-meta-value">{formatBytes(cloneStatus.totalSizeBytes ?? 0)}</span>
-              </div>
-            </div>
-
-            {(cloneStatus.topLevelDirectories?.length || cloneStatus.topLevelFiles?.length) ? (
-              <div className="repository-top-level">
-                <span className="repository-meta-label">Top-level structure</span>
-                <ul className="repository-top-level-list">
-                  {cloneStatus.topLevelDirectories?.map((dir) => (
-                    <li key={`dir-${dir}`}>{dir}/</li>
-                  ))}
-                  {cloneStatus.topLevelFiles?.map((file) => (
-                    <li key={`file-${file}`}>{file}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-        )}
+        <div className="repo-pipeline-track">
+          <PipelineStage
+            icon={DownloadIcon}
+            label="Clone"
+            meta={cloneStatus ? CLONE_STAGE_META[cloneStatus.status] : NOT_STARTED_META}
+            timestamp={cloneStatus?.completedAt}
+            action={
+              cloneInProgress
+                ? { label: cancelling ? 'Cancelling…' : 'Cancel', onClick: handleCancelClone, disabled: cancelling }
+                : {
+                    label: starting ? 'Starting…' : cloneStatus ? 'Clone Again' : 'Clone Repository',
+                    onClick: handleStartClone,
+                    disabled: starting || !canConfigure,
+                    disabledReason: canConfigure ? undefined : notConfigureReason,
+                    variant: cloneStatus ? 'ghost' : 'primary',
+                  }
+            }
+          />
+          <PipelineArrow />
+          <PipelineStage
+            icon={ListIcon}
+            label="Index"
+            meta={!cloneReady ? WAITING_META : indexStatus ? INDEX_STAGE_META[indexStatus.status] : NOT_STARTED_META}
+            timestamp={indexStatus?.completedAt}
+            hint={!cloneReady ? 'Waiting for clone to finish' : undefined}
+            action={
+              !cloneReady
+                ? null
+                : indexInProgress
+                ? { label: cancellingIndex ? 'Cancelling…' : 'Cancel', onClick: handleCancelIndex, disabled: cancellingIndex }
+                : {
+                    label: startingIndex ? 'Starting…' : indexStatus ? 'Index Again' : 'Index Repository',
+                    onClick: handleStartIndex,
+                    disabled: startingIndex || !canConfigure,
+                    disabledReason: canConfigure ? undefined : notConfigureReason,
+                    variant: indexStatus ? 'ghost' : 'primary',
+                  }
+            }
+          />
+          <PipelineArrow />
+          <PipelineStage
+            icon={SparkleIcon}
+            label="Embeddings"
+            meta={!indexReady ? WAITING_META : embedStatus ? EMBED_STAGE_META[embedStatus.status] : NOT_STARTED_META}
+            timestamp={embedStatus?.completedAt}
+            hint={!indexReady ? 'Waiting for index to finish' : undefined}
+            action={
+              !indexReady
+                ? null
+                : embedInProgress
+                ? { label: cancellingEmbed ? 'Cancelling…' : 'Cancel', onClick: handleCancelEmbed, disabled: cancellingEmbed }
+                : {
+                    label: startingEmbed ? 'Starting…' : embedStatus ? 'Generate Again' : 'Generate Embeddings',
+                    onClick: handleStartEmbed,
+                    disabled: startingEmbed || !canConfigure,
+                    disabledReason: canConfigure ? undefined : notConfigureReason,
+                    variant: embedStatus ? 'ghost' : 'primary',
+                  }
+            }
+          />
+          <PipelineArrow />
+          <PipelineStage icon={SearchIcon} label="Search" meta={embedReady ? READY_META : WAITING_META} hint={embedReady ? 'Semantic search enabled' : undefined} />
+          <PipelineArrow />
+          <PipelineStage icon={MessageIcon} label="AI Assistant" meta={embedReady ? READY_META : WAITING_META} hint={embedReady ? 'Ask questions about this repo' : undefined} />
+        </div>
       </section>
 
+      <div className="repo-summary-grid repo-detail-metrics-grid">
+        <div className="repo-summary-tile">
+          <span className="repo-summary-tile-icon total" aria-hidden="true"><DocumentIcon /></span>
+          <div>
+            <span className="repo-summary-tile-count">{typeof cloneStatus?.fileCount === 'number' ? cloneStatus.fileCount : '—'}</span>
+            <span className="repo-summary-tile-label">Files</span>
+          </div>
+        </div>
+        <div className="repo-summary-tile">
+          <span className="repo-summary-tile-icon processing" aria-hidden="true"><FolderIcon /></span>
+          <div>
+            <span className="repo-summary-tile-count">{typeof cloneStatus?.directoryCount === 'number' ? cloneStatus.directoryCount : '—'}</span>
+            <span className="repo-summary-tile-label">Directories</span>
+          </div>
+        </div>
+        <div className="repo-summary-tile">
+          <span className="repo-summary-tile-icon ready" aria-hidden="true"><CubeIcon /></span>
+          <div>
+            <span className="repo-summary-tile-count">{typeof indexStatus?.chunksCreated === 'number' && indexReady ? indexStatus.chunksCreated : '—'}</span>
+            <span className="repo-summary-tile-label">Code Chunks</span>
+          </div>
+        </div>
+        <div className="repo-summary-tile">
+          <span className="repo-summary-tile-icon total" aria-hidden="true"><DatabaseIcon /></span>
+          <div>
+            <span className="repo-summary-tile-count">{typeof cloneStatus?.totalSizeBytes === 'number' ? formatBytes(cloneStatus.totalSizeBytes) : '—'}</span>
+            <span className="repo-summary-tile-label">Repository Size</span>
+          </div>
+        </div>
+      </div>
+
       {cloneReady && (
-        <section className="repository-clone-section">
-          <div className="repository-clone-header">
-            <div>
-              <span className="section-title">Repository Index</span>
-              <p className="repository-clone-state">
-                {indexStatus ? INDEX_STATUS_LABEL[indexStatus.status] : 'Not indexed'}
-              </p>
-            </div>
-            <div className="repository-clone-actions">
-              {indexInProgress ? (
-                <button type="button" className="ghost-button" onClick={handleCancelIndex} disabled={cancellingIndex}>
-                  {cancellingIndex ? 'Cancelling…' : 'Cancel Indexing'}
-                </button>
-              ) : (
-                <button type="button" className="primary-button" onClick={handleStartIndex} disabled={startingIndex}>
-                  {startingIndex ? 'Starting…' : indexStatus ? 'Index Again' : 'Index Repository'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {indexActionError && <p className="connect-repo-error" role="alert">{indexActionError}</p>}
-
-          {indexInProgress && (
-            <div className="repository-clone-progress">
-              <div className="spinner-inline" aria-hidden="true" />
-              <p className="muted">
-                {indexStatus?.status === 'QUEUED' ? 'Waiting for a worker to pick up indexing…' : 'Parsing source files and building the code index…'}
-              </p>
-            </div>
-          )}
-
-          {indexStatus?.status === 'FAILED' && (
-            <HealthBanner variant="error" role="alert">{indexStatus.error ?? 'Indexing failed.'}</HealthBanner>
-          )}
-
-          {indexStatus?.status === 'CANCELLED' && (
-            <HealthBanner variant="warning">Indexing cancelled.</HealthBanner>
-          )}
-
-          {indexReady && (
-            <div className="repository-discovery">
-              <HealthBanner variant="ok">Repository indexed successfully — ready for search.</HealthBanner>
-              <div className="repository-meta-grid">
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Commit</span>
-                  <span className="repository-meta-value repository-commit-sha">{indexStatus.commitSha}</span>
-                </div>
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Files Indexed</span>
-                  <span className="repository-meta-value">{indexStatus.filesIndexed}</span>
-                </div>
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Files Skipped</span>
-                  <span className="repository-meta-value">{indexStatus.filesSkipped}</span>
-                </div>
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Code Chunks</span>
-                  <span className="repository-meta-value">{indexStatus.chunksCreated}</span>
-                </div>
-              </div>
-
-              {indexSummary && Object.keys(indexSummary.languages).length > 0 && (
-                <div className="repository-top-level">
-                  <span className="repository-meta-label">Languages</span>
-                  <ul className="repository-top-level-list">
-                    {Object.entries(indexSummary.languages)
-                      .sort(([, a], [, b]) => b - a)
-                      .map(([language, count]) => (
-                        <li key={language}>{LANGUAGE_LABEL[language] ?? language}: {count}</li>
-                      ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-      )}
-
-      {indexReady && (
-        <section className="repository-clone-section">
-          <div className="repository-clone-header">
-            <div>
-              <span className="section-title">Repository Embeddings</span>
-              <p className="repository-clone-state">
-                {embedStatus ? EMBED_STATUS_LABEL[embedStatus.status] : 'Not embedded'}
-              </p>
-            </div>
-            <div className="repository-clone-actions">
-              {embedInProgress ? (
-                <button type="button" className="ghost-button" onClick={handleCancelEmbed} disabled={cancellingEmbed}>
-                  {cancellingEmbed ? 'Cancelling…' : 'Cancel Embedding'}
-                </button>
-              ) : (
-                <button type="button" className="primary-button" onClick={handleStartEmbed} disabled={startingEmbed}>
-                  {startingEmbed ? 'Starting…' : embedStatus ? 'Generate Embeddings Again' : 'Generate Embeddings'}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {embedActionError && <p className="connect-repo-error" role="alert">{embedActionError}</p>}
-
-          {embedInProgress && (
-            <div className="repository-clone-progress">
-              <div className="spinner-inline" aria-hidden="true" />
-              <p className="muted">
-                {embedStatus?.status === 'QUEUED' ? 'Waiting for a worker to pick up embedding…' : 'Generating BGE-M3 embeddings for each code chunk…'}
-              </p>
-            </div>
-          )}
-
-          {embedStatus?.status === 'FAILED' && (
-            <HealthBanner variant="error" role="alert">{embedStatus.error ?? 'Embedding failed.'}</HealthBanner>
-          )}
-
-          {embedStatus?.status === 'CANCELLED' && (
-            <HealthBanner variant="warning">Embedding cancelled.</HealthBanner>
-          )}
-
-          {embedReady && (
-            <div className="repository-discovery">
-              <HealthBanner variant="ok">Embeddings ready.</HealthBanner>
-              <div className="repository-meta-grid">
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Commit</span>
-                  <span className="repository-meta-value repository-commit-sha">{embedStatus.commitSha}</span>
-                </div>
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Embedding Model</span>
-                  <span className="repository-meta-value">{embedStatus.model}</span>
-                </div>
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Dimensions</span>
-                  <span className="repository-meta-value">{embedStatus.dimensions ?? '—'}</span>
-                </div>
-                <div className="repository-meta-item">
-                  <span className="repository-meta-label">Chunks</span>
-                  <span className="repository-meta-value">{embedStatus.embeddedChunks} / {embedStatus.totalChunks}</span>
-                </div>
+        <div className="repo-detail-columns">
+          <section className="repo-intelligence-panel">
+            <div className="repo-panel-header">
+              <span className="repo-panel-icon" aria-hidden="true"><SparkleIcon /></span>
+              <div>
+                <h2>Repository Intelligence</h2>
+                <p>Search your code or ask a question about this repository.</p>
               </div>
             </div>
-          )}
-        </section>
-      )}
 
-      {indexReady && (
-        <section className="repository-clone-section repository-search-section">
-          <div className="repository-clone-header">
-            <div>
-              <span className="section-title">Repository Search</span>
-              <p className="repository-clone-state">{embedReady ? 'Semantic code search' : 'Embeddings required'}</p>
-            </div>
-          </div>
-
-          {!embedReady && (
-            <HealthBanner variant="info">Generate embeddings for this repository (above) before you can search its code.</HealthBanner>
-          )}
-
-          {embedReady && (
-            <>
-              <form className="repository-search-form" onSubmit={handleSearch}>
-                <input
-                  type="text"
-                  className="search-input"
-                  placeholder="Search this repository's code, e.g. “where is authentication handled?”"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  aria-label="Repository search query"
-                />
-                <button type="submit" className="primary-button" disabled={searching}>
-                  {searching ? 'Searching…' : 'Search'}
-                </button>
-              </form>
-
-              {searchError && <p className="connect-repo-error" role="alert">{searchError}</p>}
-
-              {searching && (
-                <div className="repository-clone-progress">
-                  <div className="spinner-inline" aria-hidden="true" />
-                  <p className="muted">Embedding your query and searching indexed code…</p>
+            {!indexReady ? (
+              <HealthBanner variant="info">Index this repository (above) to enable search and AI Q&amp;A.</HealthBanner>
+            ) : (
+              <>
+                <div className="workspace-tabs repo-intel-tabs" role="tablist" aria-label="Repository intelligence mode">
+                  <button type="button" role="tab" aria-selected={intelMode === 'search'} className={`workspace-tab ${intelMode === 'search' ? 'active' : ''}`} onClick={() => setIntelMode('search')}>
+                    <SearchIcon /> Search
+                  </button>
+                  <button type="button" role="tab" aria-selected={intelMode === 'ask'} className={`workspace-tab ${intelMode === 'ask' ? 'active' : ''}`} onClick={() => setIntelMode('ask')}>
+                    <MessageIcon /> Ask AI
+                  </button>
                 </div>
-              )}
 
-              {!searching && hasSearched && searchResponse && (
-                <div className="repository-discovery">
-                  {searchResponse.reranked === false && (
-                    <HealthBanner variant="warning">
-                      The reranking model is unavailable right now — showing vector-similarity results only (not reranked).
-                    </HealthBanner>
-                  )}
+                {!embedReady && (
+                  <HealthBanner variant="info">Generate embeddings for this repository (above) before you can search or ask questions.</HealthBanner>
+                )}
 
-                  {searchResponse.results.length === 0 ? (
-                    <p className="muted">No matching code found for “{searchResponse.query}”.</p>
-                  ) : (
-                    <ul className="repository-search-results">
-                      {searchResponse.results.map((result) => (
-                        <li key={result.chunkId} className="repository-search-result">
-                          <div className="repository-search-result-header">
-                            <span className="repository-search-result-symbol">{result.symbol}</span>
-                            <span className="badge">{LANGUAGE_LABEL[result.language] ?? result.language}</span>
-                            {typeof result.rerankerScore === 'number' && (
-                              <span className="repository-search-result-score">rerank score {result.rerankerScore.toFixed(3)}</span>
+                {embedReady && intelMode === 'search' && (
+                  <div className="repo-intel-mode">
+                    <form className="repository-search-form" onSubmit={handleSearch}>
+                      <input
+                        type="text"
+                        className="search-input"
+                        placeholder="Search code, files, functions, or ask a question…"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        aria-label="Repository search query"
+                      />
+                      <button type="submit" className="primary-button" disabled={searching}>
+                        {searching ? 'Searching…' : 'Search'}
+                      </button>
+                    </form>
+
+                    {!hasSearched && (
+                      <div className="repo-suggested-queries">
+                        <span className="repo-suggested-queries-label">Try these example questions:</span>
+                        {SEARCH_SUGGESTIONS.map((q) => (
+                          <button key={q} type="button" className="repo-suggested-query" onClick={() => handleSuggestedSearch(q)}>
+                            {q} <ArrowRightIcon />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {searchError && <p className="connect-repo-error" role="alert">{searchError}</p>}
+
+                    {searching && (
+                      <div className="repository-clone-progress">
+                        <div className="spinner-inline" aria-hidden="true" />
+                        <p className="muted">Embedding your query and searching indexed code…</p>
+                      </div>
+                    )}
+
+                    {!searching && hasSearched && searchResponse && (
+                      <div className="repository-discovery">
+                        {searchResponse.reranked === false && (
+                          <HealthBanner variant="warning">The reranking model is unavailable right now — showing vector-similarity results only (not reranked).</HealthBanner>
+                        )}
+
+                        {searchResponse.results.length === 0 ? (
+                          <p className="muted">No matching code found for "{searchResponse.query}".</p>
+                        ) : (
+                          <ul className="repository-search-results">
+                            {searchResponse.results.map((result) => (
+                              <li key={result.chunkId} className="repository-search-result">
+                                <div className="repository-search-result-header">
+                                  <span className="repository-search-result-symbol">{result.symbol}</span>
+                                  <span className="badge">{LANGUAGE_LABEL[result.language] ?? result.language}</span>
+                                  {typeof result.rerankerScore === 'number' && (
+                                    <span className="repository-search-result-score">rerank score {result.rerankerScore.toFixed(3)}</span>
+                                  )}
+                                </div>
+                                <div className="repository-search-result-path">{result.filePath}:{result.startLine}-{result.endLine}</div>
+                                {result.content && <pre className="repository-search-result-content"><code>{result.content}</code></pre>}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {embedReady && intelMode === 'ask' && (
+                  <div className="repo-intel-mode">
+                    {!canAskAI ? (
+                      <HealthBanner variant="warning">Only workspace owners, admins, and members can ask the AI assistant.</HealthBanner>
+                    ) : (
+                      <>
+                        <form className="repository-search-form" onSubmit={handleAsk}>
+                          <input
+                            type="text"
+                            className="search-input"
+                            placeholder="Ask something about this repository…"
+                            value={askQuery}
+                            onChange={(e) => setAskQuery(e.target.value)}
+                            aria-label="Repository assistant question"
+                          />
+                          <button type="submit" className="primary-button" disabled={asking}>
+                            {asking ? 'Asking…' : 'Ask AI'}
+                          </button>
+                        </form>
+
+                        {!hasAsked && (
+                          <div className="repo-suggested-queries">
+                            <span className="repo-suggested-queries-label">Try these example questions:</span>
+                            {ASK_SUGGESTIONS.map((q) => (
+                              <button key={q} type="button" className="repo-suggested-query" onClick={() => handleSuggestedAsk(q)}>
+                                {q} <ArrowRightIcon />
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {askError && <p className="connect-repo-error" role="alert">{askError}</p>}
+
+                        {asking && (
+                          <div className="repository-clone-progress">
+                            <div className="spinner-inline" aria-hidden="true" />
+                            <p className="muted">Retrieving relevant code and generating an answer…</p>
+                          </div>
+                        )}
+
+                        {!asking && hasAsked && askResponse && (
+                          <div className="repository-discovery">
+                            {askResponse.reranked === false && (
+                              <HealthBanner variant="warning">The reranking model is unavailable right now — this answer is based on vector-similarity results only (not reranked).</HealthBanner>
+                            )}
+
+                            <div className="repository-ask-answer">
+                              <span className="repository-meta-label">Answer</span>
+                              <p>{askResponse.answer}</p>
+                            </div>
+
+                            {askResponse.sources.length === 0 ? (
+                              <p className="muted">No sources — the indexed repository context was not sufficient for a grounded answer.</p>
+                            ) : (
+                              <div className="repository-ask-sources">
+                                <span className="repository-meta-label">Sources</span>
+                                <ul className="repository-search-results">
+                                  {askResponse.sources.map((source, i) => (
+                                    <li key={`${source.filePath}-${source.symbol}-${i}`} className="repository-search-result">
+                                      <div className="repository-search-result-header">
+                                        <span className="repository-search-result-symbol">{source.symbol}</span>
+                                        <span className="badge">{source.symbolType}</span>
+                                      </div>
+                                      <div className="repository-search-result-path">{source.filePath}:{source.startLine}-{source.endLine}</div>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
                             )}
                           </div>
-                          <div className="repository-search-result-path repository-commit-sha">
-                            {result.filePath}:{result.startLine}-{result.endLine}
-                          </div>
-                          {result.content && (
-                            <pre className="repository-search-result-content"><code>{result.content}</code></pre>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </section>
-      )}
-
-      {indexReady && (
-        <section className="repository-clone-section repository-ask-section">
-          <div className="repository-clone-header">
-            <div>
-              <span className="section-title">Repository Assistant</span>
-              <p className="repository-clone-state">{embedReady ? 'Grounded code Q&A' : 'Embeddings required'}</p>
-            </div>
-          </div>
-
-          {!embedReady && (
-            <HealthBanner variant="info">Generate embeddings for this repository (above) before you can ask questions about its code.</HealthBanner>
-          )}
-
-          {embedReady && (
-            <>
-              <form className="repository-search-form" onSubmit={handleAsk}>
-                <input
-                  type="text"
-                  className="search-input"
-                  placeholder="Ask something about this repository, e.g. “How is the health score calculated?”"
-                  value={askQuery}
-                  onChange={(e) => setAskQuery(e.target.value)}
-                  aria-label="Repository assistant question"
-                />
-                <button type="submit" className="primary-button" disabled={asking}>
-                  {asking ? 'Asking…' : 'Ask'}
-                </button>
-              </form>
-
-              {askError && <p className="connect-repo-error" role="alert">{askError}</p>}
-
-              {asking && (
-                <div className="repository-clone-progress">
-                  <div className="spinner-inline" aria-hidden="true" />
-                  <p className="muted">Retrieving relevant code and generating an answer…</p>
-                </div>
-              )}
-
-              {!asking && hasAsked && askResponse && (
-                <div className="repository-discovery">
-                  {askResponse.reranked === false && (
-                    <HealthBanner variant="warning">
-                      The reranking model is unavailable right now — this answer is based on vector-similarity results only (not reranked).
-                    </HealthBanner>
-                  )}
-
-                  <div className="repository-ask-answer">
-                    <span className="repository-meta-label">Answer</span>
-                    <p>{askResponse.answer}</p>
+                        )}
+                      </>
+                    )}
                   </div>
+                )}
+              </>
+            )}
+          </section>
 
-                  {askResponse.sources.length === 0 ? (
-                    <p className="muted">No sources — the indexed repository context was not sufficient for a grounded answer.</p>
-                  ) : (
-                    <div className="repository-ask-sources">
-                      <span className="repository-meta-label">Sources</span>
-                      <ul className="repository-search-results">
-                        {askResponse.sources.map((source, i) => (
-                          <li key={`${source.filePath}-${source.symbol}-${i}`} className="repository-search-result">
-                            <div className="repository-search-result-header">
-                              <span className="repository-search-result-symbol">{source.symbol}</span>
-                              <span className="badge">{source.symbolType}</span>
-                            </div>
-                            <div className="repository-search-result-path repository-commit-sha">
-                              {source.filePath}:{source.startLine}-{source.endLine}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
+          <section className="repo-overview-panel">
+            <div className="repo-panel-header">
+              <span className="repo-panel-icon" aria-hidden="true"><BookIcon /></span>
+              <div>
+                <h2>Repository Overview</h2>
+                <p>Structure, languages, and key details about this repository.</p>
+              </div>
+            </div>
+
+            {allTopLevel.length > 0 && (
+              <div className="repo-overview-section">
+                <div className="repo-overview-section-header">
+                  <span>Top-level structure ({allTopLevel.length} items)</span>
+                  {allTopLevel.length > STRUCTURE_PREVIEW_LIMIT && (
+                    <button type="button" className="repo-view-all-toggle" onClick={() => setStructureExpanded((v) => !v)}>
+                      {structureExpanded ? 'Show less' : 'View all'}
+                    </button>
                   )}
                 </div>
-              )}
-            </>
-          )}
-        </section>
+                <div className="repo-structure-chips">
+                  {visibleTopLevel.map((entry) => (
+                    <span key={`${entry.type}-${entry.name}`} className="repo-structure-chip">
+                      {entry.type === 'dir' ? <FolderIcon /> : <DocumentIcon />}
+                      {entry.name}{entry.type === 'dir' ? '/' : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {languageEntries.length > 0 && (
+              <div className="repo-overview-section">
+                <div className="repo-overview-section-header"><span>Language breakdown</span></div>
+                <div className="repo-language-bars">
+                  {languageEntries.map(([language, count]) => {
+                    const pct = languageTotal > 0 ? (count / languageTotal) * 100 : 0;
+                    return (
+                      <div key={language} className="repo-language-bar-row">
+                        <span className="repo-language-name">{LANGUAGE_LABEL[language] ?? language}</span>
+                        <AnimatedProgressBar percent={pct} trackClassName="repo-language-bar-track" fillClassName="repo-language-bar-fill" />
+                        <span className="repo-language-count">{count}</span>
+                        <span className="repo-language-pct">{pct.toFixed(0)}%</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {allTopLevel.length === 0 && languageEntries.length === 0 && (
+              <p className="muted">Structure and language details will appear here once indexing completes.</p>
+            )}
+          </section>
+        </div>
       )}
 
       {indexReady && (
-        <section className="repository-clone-section repository-issues-section">
-          <div className="repository-clone-header">
+        <section className="repo-issues-section">
+          <div className="repo-panel-header repo-issues-header">
+            <span className="repo-panel-icon" aria-hidden="true"><AlertTriangleIcon /></span>
             <div>
-              <span className="section-title">Repository Issues</span>
-              <p className="repository-clone-state">{issues.length} issue{issues.length === 1 ? '' : 's'}</p>
+              <h2>Repository Issues</h2>
+              <p>Code issues found in this repository.</p>
             </div>
-            <div className="repository-clone-actions">
-              <button type="button" className="primary-button" onClick={() => setShowCreateIssueForm((v) => !v)}>
-                {showCreateIssueForm ? 'Cancel' : 'Report Issue'}
-              </button>
-            </div>
+            <button type="button" className="primary-button" onClick={() => setShowCreateIssueForm((v) => !v)}>
+              {showCreateIssueForm ? 'Cancel' : 'Report Issue'}
+            </button>
           </div>
 
           {issuesError && <p className="connect-repo-error" role="alert">{issuesError}</p>}
@@ -930,27 +1204,48 @@ export function RepositoryDetailPage() {
               <p className="muted">Loading issues…</p>
             </div>
           ) : issues.length === 0 ? (
-            <p className="muted">No issues reported yet.</p>
+            <div className="empty-state-card">
+              <span className="empty-state-icon" aria-hidden="true"><CheckCircleIcon /></span>
+              <h3>No issues reported yet</h3>
+              <p>This repository currently has no reported code issues.</p>
+            </div>
           ) : (
-            <ul className="repository-issue-list">
-              {issues.map((issue) => (
-                <li key={issue.id} className="repository-issue-item">
-                  <Link to={`/repositories/${id}/issues/${issue.id}`} className="repository-issue-link">
-                    <span className={`badge ${issue.severity.toLowerCase()}`}>{issue.severity}</span>
-                    <span className="repository-issue-title">{issue.title}</span>
-                    <span className="repository-issue-status">{issue.status}</span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+            <>
+              <div className="repo-issues-summary">
+                <span>{issues.length} issue{issues.length === 1 ? '' : 's'}</span>
+                {severityCounts.CRITICAL > 0 && <span className="repo-issue-count-chip critical">Critical {severityCounts.CRITICAL}</span>}
+                {severityCounts.HIGH > 0 && <span className="repo-issue-count-chip high">High {severityCounts.HIGH}</span>}
+                {severityCounts.MEDIUM > 0 && <span className="repo-issue-count-chip medium">Medium {severityCounts.MEDIUM}</span>}
+                {severityCounts.LOW > 0 && <span className="repo-issue-count-chip low">Low {severityCounts.LOW}</span>}
+              </div>
+              <ul className="repo-issue-list">
+                {issues.map((issue) => (
+                  <li key={issue.id} className="repo-issue-row">
+                    <Link to={`/repositories/${id}/issues/${issue.id}`} className="repo-issue-row-link">
+                      <span className={`badge ${SEVERITY_BADGE_CLASS[issue.severity]}`}>{issue.severity}</span>
+                      <div className="repo-issue-row-body">
+                        <span className="repo-issue-row-title">{issue.title}</span>
+                        {issue.filePath && (
+                          <span className="repo-issue-row-path">
+                            {issue.filePath}
+                            {typeof issue.lineStart === 'number' ? `:${issue.lineStart}${typeof issue.lineEnd === 'number' && issue.lineEnd !== issue.lineStart ? `-${issue.lineEnd}` : ''}` : ''}
+                          </span>
+                        )}
+                      </div>
+                      <span className="repo-issue-row-source">{issue.source === 'AI_DETECTED' ? 'AI detected' : 'User reported'}</span>
+                      <span className="repo-issue-row-view">View</span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </section>
       )}
 
       {!indexReady && (
         <HealthBanner variant="info">
-          Repository analysis is not available yet. Indexing, code search, and AI-powered analysis for connected
-          repositories are coming in a future phase.
+          Repository analysis is not available yet. Clone and index this repository (above) to enable search, code chunks, and AI-powered analysis.
         </HealthBanner>
       )}
     </div>

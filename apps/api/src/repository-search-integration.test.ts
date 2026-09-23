@@ -142,7 +142,7 @@ describe('Repository search — end-to-end integration against a deterministic c
     const stores = { indexStore, embeddingStore, searchRepository: new RepositorySearchRepository() };
 
     const response = await searchRepository(
-      { id: repositoryId, userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId, ownerId: 'owner-a', query: 'how are users authenticated when they log in with a password' },
       { embeddingProvider: new ConceptEmbeddingProvider(), rerankerProvider: new OverlapRerankerProvider() },
@@ -159,7 +159,7 @@ describe('Repository search — end-to-end integration against a deterministic c
     const stores = { indexStore, embeddingStore, searchRepository: new RepositorySearchRepository() };
 
     const response = await searchRepository(
-      { id: repositoryId, userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId, ownerId: 'owner-a', query: 'where do we process a payment charge and invoice billing at checkout' },
       { embeddingProvider: new ConceptEmbeddingProvider(), rerankerProvider: new OverlapRerankerProvider() },
@@ -173,7 +173,7 @@ describe('Repository search — end-to-end integration against a deterministic c
     const stores = { indexStore, embeddingStore, searchRepository: new RepositorySearchRepository() };
 
     const response = await searchRepository(
-      { id: repositoryId, userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId, ownerId: 'owner-a', query: 'how does the mobile menu navigation header render its links' },
       { embeddingProvider: new ConceptEmbeddingProvider(), rerankerProvider: new OverlapRerankerProvider() },
@@ -205,7 +205,7 @@ describe('Repository search — end-to-end integration against a deterministic c
     }
 
     const response = await searchRepository(
-      { id: repositoryId, userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId, ownerId: 'owner-a', query: 'formatting a currency amount and a date value with a helper' },
       { embeddingProvider: new ConceptEmbeddingProvider(), rerankerProvider: new AlwaysFailReranker() },
@@ -245,7 +245,7 @@ describe('Repository search — end-to-end integration against a deterministic c
 
     const stores = { indexStore, embeddingStore, searchRepository: new RepositorySearchRepository() };
     const response = await searchRepository(
-      { id: repositoryId, userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId, ownerId: 'owner-a', query: 'authentication login password session' },
       { embeddingProvider: new ConceptEmbeddingProvider(), rerankerProvider: new OverlapRerankerProvider() },
@@ -265,7 +265,7 @@ describe('Repository search — end-to-end integration against a deterministic c
 
     await assert.rejects(
       () => searchRepository(
-        { id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' },
+        { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' },
         stores,
         { repositoryId, ownerId: 'owner-a', query: 'anything' },
         { embeddingProvider: new ConceptEmbeddingProvider(), rerankerProvider: new OverlapRerankerProvider() },

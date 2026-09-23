@@ -13,8 +13,9 @@ import {
   resolveCloneDir,
 } from '../repository-clone-service.js';
 import { parseRepositoryUrl, validateBranch } from '../repository-service.js';
-import { GitCloneError, cloneRepository, getCommitSha, sanitizeGitError } from '../repository-git.js';
+import { GitCloneError, type GitCredentials, cloneRepository, getCommitSha, sanitizeGitError } from '../repository-git.js';
 import { RepositoryLimitExceededError, discoverRepository } from '../repository-discovery.js';
+import { resolveRepositoryProvider } from '../repository-provider-resolver.js';
 import { getRedisConnection } from './website-scan-worker.js';
 
 const QUEUE_NAME = 'repository-clone-jobs';
@@ -28,8 +29,35 @@ export interface RepositoryCloneJobPayload {
   jobId: string;
   repositoryId: string;
   ownerId?: string;
+  /** Used only to decide whether a private-repo credential can even be attempted (GitHub/Bitbucket — see resolveCloneCredentials); GitLab clones remain exactly as anonymous as before. */
+  provider?: string;
   repoUrl: string;
   branch: string;
+}
+
+/** Providers whose getPushCredentials() is known-safe to call this early (well before any push) — GitHub mints a fresh installation token per call, Bitbucket's resolveBitbucketAccessToken transparently refreshes-and-persists only when the cached token is actually expired. Neither has a side effect from being called "too early." GitLab is deliberately left out until the same review is done for it. */
+const CLONE_CREDENTIAL_PROVIDERS = new Set(['GITHUB', 'BITBUCKET']);
+
+/**
+ * Best-effort credential resolution for the clone step — mirrors the
+ * PR-approval flow's already-working per-user credential resolution
+ * (repository-fix-workflow-service.ts), just resolved one step earlier so a
+ * PRIVATE repository can be cloned at all (the plain `git clone` this worker
+ * used before had no credential of any kind).
+ *
+ * Deliberately silent/undefined on any failure — a public repo with no
+ * provider connection at all must keep cloning exactly as it always has
+ * (anonymously); this only ever ADDS a credential when one is available,
+ * never removes the ability to clone anonymously.
+ */
+async function resolveCloneCredentials(payload: RepositoryCloneJobPayload, owner: string, name: string, signal: AbortSignal): Promise<GitCredentials | undefined> {
+  if (!payload.provider || !CLONE_CREDENTIAL_PROVIDERS.has(payload.provider) || !payload.ownerId) return undefined;
+  try {
+    const credentials = await resolveRepositoryProvider(payload.provider).getPushCredentials(payload.ownerId, owner, name, signal);
+    return { token: credentials.token, username: credentials.username };
+  } catch {
+    return undefined;
+  }
 }
 
 interface JobControl {
@@ -185,7 +213,8 @@ export async function processJob(
     await repositoryStore.updateStatus(payload.repositoryId, 'CLONING');
     logLifecycle('repository_clone_started', { repositoryId: payload.repositoryId, jobId: payload.jobId });
 
-    await deps.clone(parsedUrl.value.normalizedUrl, parsedBranch.value, cloneDir, controller.signal);
+    const credentials = await resolveCloneCredentials(payload, parsedUrl.value.owner, parsedUrl.value.name, controller.signal);
+    await deps.clone(parsedUrl.value.normalizedUrl, parsedBranch.value, cloneDir, controller.signal, credentials);
 
     if (controller.signal.aborted) {
       throw new GitCloneError('Clone aborted', 'aborted');

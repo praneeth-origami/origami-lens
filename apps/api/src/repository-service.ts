@@ -101,16 +101,18 @@ export function validateBranch(rawBranch: string | undefined): ValidationResult<
 }
 
 /**
- * Real, strict ownership check (Phase 16/B) — replaces the pre-Phase-A
- * "allow if either side is missing" behavior now that both sides are
- * trustworthy: `repoOwnerId` is `repository.userId` (a real FK to `users`,
- * migration 012, set only from an authenticated request.user.id at
- * creation) and `requestOwnerId` is the CURRENT caller's request.user.id
- * (never client-supplied). A repository with no owner (a legacy
- * pre-Phase-16 row, user_id NULL) is therefore accessible to no one —
- * a deliberate tradeoff, not a bug (see the Phase 16 design report's
- * migration-strategy section). Every caller of this function must pass
- * `.userId`, never the legacy `.ownerId` field.
+ * Real, strict ownership check — replaces the pre-Phase-A "allow if either
+ * side is missing" behavior now that both sides are trustworthy:
+ * `repoOwnerId` is `repository.organizationId` (a real FK to
+ * `organizations`, migration 016, set only from the creating user's
+ * resolved organization at creation — see index.ts's resolveOrganizationIds)
+ * and `requestOwnerId` is one of the CURRENT caller's own organization ids
+ * (never client-supplied). A repository with no organization (a legacy
+ * pre-Phase-2 row, organization_id NULL) is therefore accessible to no one —
+ * a deliberate tradeoff, not a bug (see migration 016's comment). Every
+ * caller of this function must pass `.organizationId`, never the legacy
+ * `.ownerId`/`.userId` fields — `.userId` is audit-only ("who created this")
+ * since Phase 2, not an authorization boundary.
  */
 export function canAccessRepository(repoOwnerId: string | undefined, requestOwnerId: string | undefined): boolean {
   return Boolean(repoOwnerId) && repoOwnerId === requestOwnerId;

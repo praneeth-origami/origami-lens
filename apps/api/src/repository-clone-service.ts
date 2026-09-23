@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
@@ -44,6 +45,21 @@ export function resolveCloneDir(repositoryId: string, jobId: string): string {
     throw new Error('Invalid repository or job identifier for clone path');
   }
   return path.join(REPOSITORY_CLONE_ROOT, repositoryId, jobId);
+}
+
+/**
+ * Removes every clone workspace ever created for a repository (all of its
+ * job subdirectories at once) — called after the repository's own DB row is
+ * deleted, so a deleted repository doesn't leave gigabytes of cloned source
+ * on disk forever. Same trusted-internal-id-only validation as
+ * resolveCloneDir; a no-op (never throws) if the repository was never
+ * cloned.
+ */
+export function deleteRepositoryClones(repositoryId: string): void {
+  if (!UUID_LIKE.test(repositoryId)) {
+    throw new Error('Invalid repository identifier for clone path');
+  }
+  fs.rmSync(path.join(REPOSITORY_CLONE_ROOT, repositoryId), { recursive: true, force: true });
 }
 
 /**

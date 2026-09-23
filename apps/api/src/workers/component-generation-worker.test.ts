@@ -233,11 +233,4 @@ describe('component-generation-worker cancellation', () => {
     }
   });
 
-  it('canCancelJob rejects a cancel request from a different owner but allows it when owners match or are unset (best-effort check — no real auth exists yet)', () => {
-    assert.equal(worker.canCancelJob('user-a', 'user-b'), false);
-    assert.equal(worker.canCancelJob('user-a', 'user-a'), true);
-    assert.equal(worker.canCancelJob(undefined, 'user-b'), true);
-    assert.equal(worker.canCancelJob('user-a', undefined), true);
-    assert.equal(worker.canCancelJob(undefined, undefined), true);
-  });
 });

@@ -98,13 +98,18 @@ export function CodeViewer({ componentName, files }: Props) {
         </div>
       </div>
 
-      <pre className="code-block">
-        <code>
-          {tokens.map((t, i) => (
-            <span key={i} className={t.cls}>{t.text}</span>
-          ))}
-        </code>
-      </pre>
+      <div className="code-block-wrap">
+        <div className="code-line-numbers" aria-hidden="true">
+          {active.content.split('\n').map((_, i) => <span key={i}>{i + 1}</span>)}
+        </div>
+        <pre className="code-block">
+          <code>
+            {tokens.map((t, i) => (
+              <span key={i} className={t.cls}>{t.text}</span>
+            ))}
+          </code>
+        </pre>
+      </div>
     </div>
   );
 }

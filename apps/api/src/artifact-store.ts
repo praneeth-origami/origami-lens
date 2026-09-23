@@ -51,4 +51,10 @@ export class ArtifactStore {
     if (!filePath) return undefined;
     return fs.readFileSync(filePath).toString('base64');
   }
+
+  /** Removes every screenshot saved for a scan — called after the scan's own DB row is deleted, so a deleted scan doesn't leave its screenshots orphaned on disk forever. A no-op (never throws) if the scan never had any artifacts. */
+  deleteScanArtifacts(scanId: string): void {
+    const scanDir = path.join(this.artifactsRoot, scanId);
+    fs.rmSync(scanDir, { recursive: true, force: true });
+  }
 }

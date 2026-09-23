@@ -80,6 +80,35 @@ describeIfDb('UserRepository (migration 011, real Postgres)', () => {
     const fetched = await repo.getById(randomUUID());
     assert.equal(fetched, undefined);
   });
+
+  it('a newly-created user has no persona until updatePersona is called (Phase 3 onboarding)', async () => {
+    const repo = new UserRepository();
+    const user = await repo.upsertByProviderAccount({
+      id: randomUUID(), primaryProvider: 'GITHUB', primaryProviderAccountId: randomUUID(), primaryProviderLogin: 'no-persona-yet',
+    });
+    assert.equal(user.persona, undefined);
+  });
+
+  it('updatePersona sets and persists the persona, and can be called again to change it', async () => {
+    const repo = new UserRepository();
+    const user = await repo.upsertByProviderAccount({
+      id: randomUUID(), primaryProvider: 'GITHUB', primaryProviderAccountId: randomUUID(), primaryProviderLogin: 'persona-user',
+    });
+
+    const updated = await repo.updatePersona(user.id, 'DEVELOPER');
+    assert.equal(updated.persona, 'DEVELOPER');
+
+    const fetched = await repo.getById(user.id);
+    assert.equal(fetched?.persona, 'DEVELOPER');
+
+    const changed = await repo.updatePersona(user.id, 'AGENCY');
+    assert.equal(changed.persona, 'AGENCY');
+  });
+
+  it('updatePersona throws for a user id that does not exist', async () => {
+    const repo = new UserRepository();
+    await assert.rejects(() => repo.updatePersona(randomUUID(), 'DEVELOPER'));
+  });
 });
 
 describe('UserRepository.isEnabled()', () => {

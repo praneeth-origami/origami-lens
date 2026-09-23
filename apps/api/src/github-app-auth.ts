@@ -158,3 +158,24 @@ export async function getInstallation(installationId: number, signal?: AbortSign
   const body = json as { id: number; account?: { login?: string } };
   return { id: body.id, accountLogin: body.account?.login ?? 'unknown' };
 }
+
+/**
+ * Fully removes the App installation from GitHub itself
+ * (`DELETE /app/installations/{id}`) — used by the `/providers/connections/:id`
+ * disconnect route so "Disconnect" in Origami Lens actually disconnects the
+ * GitHub App too, not just Origami Lens's own local connection record (see
+ * provider-connection-repository.ts's revokeForUser, which only ever updates
+ * our own DB row). A 404 (already uninstalled — e.g. manually from GitHub's
+ * own settings page) is treated as success, not an error: the end state
+ * ("not installed") is what the caller wants either way.
+ */
+export async function uninstallGitHubApp(installationId: number, signal?: AbortSignal): Promise<void> {
+  const config = getGitHubAppConfig();
+  if (!config) throw new GitHubAppError('GitHub App is not configured.', 'APP_NOT_CONFIGURED');
+
+  const { status } = await githubAppRequest(`/app/installations/${installationId}`, config, { method: 'DELETE' }, signal);
+  if (status === 404) return;
+  if (status < 200 || status >= 300) {
+    throw new GitHubAppError('Failed to uninstall the GitHub App installation.', 'REQUEST_FAILED');
+  }
+}

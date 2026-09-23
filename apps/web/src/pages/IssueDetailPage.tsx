@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import type {
   AggregatedIssue,
+  HealthScore,
   Issue,
   IssueStatus,
   Repository,
@@ -9,34 +10,46 @@ import type {
   RepositoryFixProposalResponse,
   RepositoryFixReviewResponse,
 } from '@origami/contracts';
+import type { RepositoryResolution } from '@origami/contracts';
 import {
   approveRepositoryFindingFix,
   ApiRequestError,
   askAi,
-  CATEGORY_LABEL,
   fetchIssue,
   fetchRepositories,
+  fetchRepositoryResolution,
   fetchScan,
   proposeRepositoryFindingFix,
   reviewRepositoryFindingFix,
-  SEVERITY_LABEL,
-  STATUS_LABEL,
   suggestFix,
   updateIssueStatus,
 } from '../api/client';
-import { IssueEvidence } from '../components/IssueEvidence';
 import { ErrorState, LoadingSkeleton } from '../components/StateViews';
-import { ScreenshotViewer } from '../components/ScreenshotViewer';
+import { Disclosure } from '../components/Disclosure';
+import { lensEvent } from '../notifications/lens-event';
+import { PullRequestIcon } from '../components/icons';
+import { IssueHeader } from '../components/IssueHeader';
+import { IssueHealthCard } from '../components/IssueHealthCard';
+import { IssueInsightCards } from '../components/IssueInsightCards';
+import { EvidenceSection } from '../components/EvidenceSection';
+import { IssueAskAi } from '../components/IssueAskAi';
+import { IssueFixWithAi } from '../components/IssueFixWithAi';
+import { IssueSidebar, type RelatedLink } from '../components/IssueSidebar';
 
-/** Phase 13 — GitLab calls the same concept a "Merge Request"; every other supported provider (GitHub, Bitbucket) calls it a "Pull Request". Purely a display-label choice — the underlying generic RepositoryFixApproveResponse is unchanged. */
-function prRequestLabel(provider: string): string {
-  return provider === 'GITLAB' ? 'Merge Request' : 'Pull Request';
+interface ScanMeta {
+  scanId: string;
+  url: string;
+  scannedAt: string;
+  healthScore?: HealthScore;
 }
+
+/** No related-links field exists anywhere in the Issue/AggregatedIssue API response today — kept empty (and the sidebar card hides itself) rather than inventing WCAG/axe/MDN URLs. See IssueSidebar.tsx's RelatedLinksCard. */
+const NO_RELATED_LINKS: RelatedLink[] = [];
 
 export function IssueDetailPage() {
   const { issueId } = useParams();
   const [issue, setIssue] = useState<Issue | AggregatedIssue | null>(null);
-  const [scanMeta, setScanMeta] = useState<{ scanId: string; url: string; scannedAt: string } | null>(null);
+  const [scanMeta, setScanMeta] = useState<ScanMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [askInput, setAskInput] = useState('Why is this happening?');
@@ -50,9 +63,12 @@ export function IssueDetailPage() {
 
   // Phase 10 — "Fix with AI": a scan finding has no inherent link to a
   // connected repository, so the user picks which one to check the finding
-  // against.
+  // against. Migration 019's repository-resolution endpoint skips that pick
+  // entirely when there's nothing to actually choose (already chosen, or
+  // only one repository connected) — see resolution below.
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [selectedRepoId, setSelectedRepoId] = useState('');
+  const [resolution, setResolution] = useState<RepositoryResolution | null>(null);
   const [aiFixInstruction, setAiFixInstruction] = useState('');
   const [aiFixLoading, setAiFixLoading] = useState(false);
   const [aiFixError, setAiFixError] = useState<string | null>(null);
@@ -95,18 +111,29 @@ export function IssueDetailPage() {
       .catch(() => setRepositories([]));
   }, []);
 
+  useEffect(() => {
+    if (!issueId) return;
+    fetchRepositoryResolution(issueId)
+      .then((res) => {
+        setResolution(res);
+        if (res.status === 'resolved') setSelectedRepoId(res.repository.id);
+      })
+      .catch(() => setResolution(null));
+  }, [issueId]);
+
   const handleStatusChange = async (status: IssueStatus) => {
     if (!issue) return;
     const updated = await updateIssueStatus(issue.id, status);
     setIssue(updated.issue);
   };
 
-  const handleAsk = async () => {
+  const handleAsk = async (question?: string) => {
     if (!issue || !scanMeta) return;
+    const q = question ?? askInput;
     setAiLoading(true);
     setAskResponse('');
     try {
-      const res = await askAi(askInput, issue, scanMeta.url);
+      const res = await askAi(q, issue, scanMeta.url);
       setAskResponse(res.answer + (res.aiAvailable ? '' : ' (Deterministic fallback — AI unavailable)'));
     } catch {
       setAskResponse('AI explanation unavailable.');
@@ -147,6 +174,7 @@ export function IssueDetailPage() {
     try {
       const proposal = await proposeRepositoryFindingFix(selectedRepoId, issue.id, aiFixInstruction.trim() || undefined);
       setAiFixProposal(proposal);
+      lensEvent.success('Fix proposal generated successfully.');
     } catch (err) {
       setAiFixError(err instanceof Error ? err.message : 'Failed to generate a fix proposal');
     } finally {
@@ -180,6 +208,11 @@ export function IssueDetailPage() {
     try {
       const result = await approveRepositoryFindingFix(selectedRepoId, issue.id, reviewResponse.applicationId, aiFixProposal);
       setPrResult(result);
+      lensEvent.success(`${result.provider === 'GITLAB' ? 'Merge Request' : 'Pull Request'} created`, {
+        resource: result.branchName,
+        detail: result.prNumber !== undefined ? `#${result.prNumber}` : undefined,
+        icon: <PullRequestIcon />,
+      });
     } catch (err) {
       setPrError(err instanceof ApiRequestError ? err.message : err instanceof Error ? err.message : 'Failed to create the pull request');
     } finally {
@@ -258,313 +291,91 @@ export function IssueDetailPage() {
     return (
       <div className="dashboard">
         <ErrorState message={error ?? 'Issue not found'} />
-        <Link to="/" className="">← Back to Dashboard</Link>
       </div>
     );
   }
 
-  const severityClass = issue.severity.toLowerCase();
-
   return (
     <div className="dashboard issue-detail-page">
-      <div className="issue-detail-topbar">
-        <Link to={`/scans/${scanMeta.scanId}`} className="primary-button">← Back to Dashboard</Link>
+      <IssueHeader
+        issue={issue}
+        scanId={scanMeta.scanId}
+        scanUrl={scanMeta.url}
+        scannedAt={scanMeta.scannedAt}
+        onShare={handleShareIssue}
+        onExport={handleExportIssue}
+        onStatusChange={handleStatusChange}
+        actionMessage={actionMessage}
+      />
 
-        <div className="issue-detail-actions">
-          <button type="button" className="ghost-button" onClick={handleShareIssue}>Share</button>
-          <button type="button" className="primary-button" onClick={handleExportIssue}>Export</button>
-        </div>
-      </div>
+      <div className="issue-detail-layout">
+        <div className="issue-detail-main">
+          <IssueHealthCard healthScore={scanMeta.healthScore} category={issue.category} />
 
-      <header className="issue-detail-header">
-        <span className={`severity-badge ${severityClass}`}>{SEVERITY_LABEL[issue.severity]}</span>
-        <h1>{issue.title}</h1>
-        <div className="detail-tags">
-          <span>{CATEGORY_LABEL[issue.category]}</span>
-          <span>{STATUS_LABEL[issue.status ?? 'open']}</span>
-          <a href={scanMeta.url} target="_blank" rel="noreferrer">{scanMeta.url}</a>
-        </div>
-      </header>
+          <IssueInsightCards issue={issue} />
 
-      <div className="detail-grid">
-        <section>
-          <h3>Problem</h3>
-          <p>{issue.problem}</p>
-        </section>
-        <section>
-          <h3>Cause</h3>
-          <p>{issue.cause}</p>
-        </section>
-        <section>
-          <h3>Impact</h3>
-          <p>{issue.impact}</p>
-        </section>
-        <section>
-          <h3>Suggested Fix</h3>
-          <p>{issue.suggestedFix}</p>
-        </section>
-      </div>
+          <EvidenceSection issue={issue} scanId={scanMeta.scanId} artifacts={scanArtifacts} />
 
-      <IssueEvidence issue={issue} />
+          {'occurrences' in issue && issue.occurrences.length > 0 && (
+            <Disclosure title="Affected Pages" meta={`${issue.affectedPages.length} pages`}>
+              <ul className="occurrences-list">
+                {issue.occurrences.map((occ, idx) => (
+                  <li key={`${occ.pageScanId}-${idx}`}>
+                    <a href={occ.url} target="_blank" rel="noreferrer">{occ.url}</a>
+                    <details>
+                      <summary>Evidence</summary>
+                      <pre>{JSON.stringify(occ.evidence, null, 2)}</pre>
+                    </details>
+                  </li>
+                ))}
+              </ul>
+            </Disclosure>
+          )}
 
-      {'occurrences' in issue && issue.occurrences.length > 0 && (
-        <section className="occurrences-section">
-          <h3>Affected Pages ({issue.affectedPages.length})</h3>
-          <ul className="occurrences-list">
-            {issue.occurrences.map((occ, idx) => (
-              <li key={`${occ.pageScanId}-${idx}`}>
-                <a href={occ.url} target="_blank" rel="noreferrer">{occ.url}</a>
-                <details>
-                  <summary>Evidence</summary>
-                  <pre>{JSON.stringify(occ.evidence, null, 2)}</pre>
-                </details>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {(issue.category === 'visualMobile' || issue.source === 'vision-ai') && scanMeta && (
-        <ScreenshotViewer scanId={scanMeta.scanId} artifacts={scanArtifacts} />
-      )}
-
-      <div className="status-control">
-        <label htmlFor="status-select">Status</label>
-        <select
-          id="status-select"
-          value={issue.status ?? 'open'}
-          onChange={(e) => handleStatusChange(e.target.value as IssueStatus)}
-        >
-          {Object.entries(STATUS_LABEL).map(([value, label]) => (
-            <option key={value} value={value}>{label}</option>
-          ))}
-        </select>
-      </div>
-
-      <div className="ai-section">
-        <h3>Ask AI</h3>
-        <div className="ask-row">
-          <input value={askInput} onChange={(e) => setAskInput(e.target.value)} />
-          <button type="button" className="ghost-button" onClick={handleAsk} disabled={aiLoading}>Ask AI</button>
-        </div>
-        {askResponse && <p className="ai-response">{askResponse}</p>}
-
-        <div className="ai-actions">
-          <button type="button" className="primary-button" onClick={handleSuggestFix} disabled={aiLoading}>
-            Suggested Fix (AI)
-          </button>
-        </div>
-        {fixResponse && <pre className="ai-response">{fixResponse}</pre>}
-        {actionMessage && <p className="detail-action-message">{actionMessage}</p>}
-      </div>
-
-      <div className="ai-section repository-ask-section">
-        <h3>Fix with AI</h3>
-        <p className="muted">
-          Analyzes this finding against a connected, indexed repository and proposes a reviewable code change.
-          This is review-only — nothing is written to the repository, and no branch, commit, or pull request is created.
-        </p>
-
-        <div className="ask-row">
-          <select className="search-input" value={selectedRepoId} onChange={(e) => setSelectedRepoId(e.target.value)} aria-label="Repository to fix against">
-            <option value="">Select a repository…</option>
-            {repositories.map((repo) => (
-              <option key={repo.id} value={repo.id}>{repo.repoUrl}</option>
-            ))}
-          </select>
-        </div>
-        <div className="ask-row">
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Optional instruction, e.g. “Fix only the accessibility issue, don't change the layout.”"
-            value={aiFixInstruction}
-            onChange={(e) => setAiFixInstruction(e.target.value)}
-            aria-label="Optional instruction for the AI"
+          <IssueAskAi
+            askInput={askInput}
+            setAskInput={setAskInput}
+            onAsk={handleAsk}
+            aiLoading={aiLoading}
+            askResponse={askResponse}
+            onSuggestFix={handleSuggestFix}
+            fixResponse={fixResponse}
           />
-          <button type="button" className="primary-button" onClick={handleProposeAiFix} disabled={aiFixLoading || !selectedRepoId}>
-            {aiFixLoading ? 'Analyzing…' : 'Fix with AI'}
-          </button>
+
+          <IssueFixWithAi
+            repositories={repositories}
+            selectedRepoId={selectedRepoId}
+            setSelectedRepoId={setSelectedRepoId}
+            resolution={resolution}
+            aiFixInstruction={aiFixInstruction}
+            setAiFixInstruction={setAiFixInstruction}
+            aiFixLoading={aiFixLoading}
+            aiFixError={aiFixError}
+            aiFixProposal={aiFixProposal}
+            aiFixDecision={aiFixDecision}
+            onProposeAiFix={handleProposeAiFix}
+            onApproveProposal={handleApproveProposal}
+            onRejectProposal={() => setAiFixDecision('rejected')}
+            reviewLoading={reviewLoading}
+            reviewError={reviewError}
+            reviewResponse={reviewResponse}
+            confirmingPr={confirmingPr}
+            setConfirmingPr={setConfirmingPr}
+            prLoading={prLoading}
+            prError={prError}
+            prResult={prResult}
+            onCreatePr={handleCreatePr}
+          />
         </div>
-        {!selectedRepoId && repositories.length > 0 && <p className="muted">Choose a connected repository above first.</p>}
-        {repositories.length === 0 && <p className="muted">No connected repositories — connect one from the Repositories page first.</p>}
 
-        {aiFixError && <p className="connect-repo-error" role="alert">{aiFixError}</p>}
-
-        {aiFixLoading && (
-          <div className="repository-clone-progress">
-            <div className="spinner-inline" aria-hidden="true" />
-            <p className="muted">Retrieving relevant code and generating a proposal…</p>
-          </div>
-        )}
-
-        {!aiFixLoading && aiFixProposal && (
-          <div className="repository-discovery">
-            {aiFixProposal.reranked === false && (
-              <p className="muted">The reranking model was unavailable — this proposal is based on vector-similarity results only.</p>
-            )}
-
-            {aiFixProposal.status === 'INSUFFICIENT_EVIDENCE' ? (
-              <p className="ai-response">{aiFixProposal.summary}</p>
-            ) : (
-              <>
-                <div className="repository-ask-answer">
-                  <span className="repository-meta-label">Summary</span>
-                  <p>{aiFixProposal.summary}</p>
-                </div>
-                <div className="repository-ask-answer">
-                  <span className="repository-meta-label">Reasoning</span>
-                  <p>{aiFixProposal.reasoning}</p>
-                </div>
-
-                <div className="repository-ask-sources">
-                  <span className="repository-meta-label">Files Changed</span>
-                  {aiFixProposal.changes.map((change) => (
-                    <div key={change.filePath} className="repository-search-result">
-                      <div className="repository-search-result-header">
-                        <span className="repository-search-result-symbol">{change.filePath}</span>
-                        <span className="badge">{change.language}</span>
-                      </div>
-                      {change.hunks.map((hunk, i) => (
-                        <pre key={i} className="repository-fix-diff">
-                          <div className="repository-commit-sha">Lines {hunk.startLine}-{hunk.endLine}</div>
-                          <div className="repository-fix-diff-line-remove">- {hunk.oldText}</div>
-                          <div className="repository-fix-diff-line-add">+ {hunk.newText}</div>
-                        </pre>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-
-                {aiFixProposal.sources.length > 0 && (
-                  <div className="repository-ask-sources">
-                    <span className="repository-meta-label">Sources</span>
-                    <ul className="repository-search-results">
-                      {aiFixProposal.sources.map((source, i) => (
-                        <li key={`${source.filePath}-${source.symbol}-${i}`} className="repository-search-result">
-                          <div className="repository-search-result-header">
-                            <span className="repository-search-result-symbol">{source.symbol}</span>
-                            <span className="badge">{source.symbolType}</span>
-                          </div>
-                          <div className="repository-search-result-path repository-commit-sha">
-                            {source.filePath}:{source.startLine}-{source.endLine}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {aiFixDecision === null ? (
-                  <div className="ai-actions">
-                    <button type="button" className="primary-button" onClick={handleApproveProposal}>Approve</button>
-                    <button type="button" className="ghost-button" onClick={() => setAiFixDecision('rejected')}>Reject</button>
-                  </div>
-                ) : aiFixDecision === 'rejected' ? (
-                  <p className="detail-action-message">Proposal rejected.</p>
-                ) : reviewLoading ? (
-                  <div className="repository-clone-progress">
-                    <div className="spinner-inline" aria-hidden="true" />
-                    <p className="muted">Applying the change to an isolated copy of the repository…</p>
-                  </div>
-                ) : reviewError ? (
-                  <p className="connect-repo-error" role="alert">{reviewError}</p>
-                ) : reviewResponse ? (
-                  <div className="repository-discovery">
-                    <p className="detail-action-message">Fix ready for review</p>
-
-                    <div className="repository-ask-sources">
-                      <span className="repository-meta-label">Changed files</span>
-                      <ul className="repository-search-results">
-                        {reviewResponse.changedFiles.map((f) => (
-                          <li key={f.filePath} className="repository-search-result">
-                            <div className="repository-search-result-header">
-                              <span className="repository-search-result-symbol">{f.filePath}</span>
-                              <span className="badge">+{f.additions}/-{f.deletions}</span>
-                            </div>
-                            <div className="repository-commit-sha">Syntax: {f.syntaxStatus}</div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-
-                    {reviewResponse.lineGrounding.length > 0 && (
-                      <div className="repository-ask-sources">
-                        <span className="repository-meta-label">Line grounding</span>
-                        <ul className="repository-search-results">
-                          {reviewResponse.lineGrounding.map((g, i) => (
-                            <li key={`${g.filePath}-${i}`} className="repository-search-result repository-commit-sha">
-                              {g.filePath}: reported line {g.reportedStartLine} → actual line {g.actualStartLine}
-                              {g.matchedExactly ? '' : ' (AI-reported line number was inaccurate — the real file content was used instead)'}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    <div className="repository-ask-sources">
-                      <span className="repository-meta-label">Diff</span>
-                      <pre className="repository-fix-diff">{reviewResponse.diff}</pre>
-                    </div>
-
-                    {!confirmingPr && !prLoading && !prResult && !prError && (
-                      <div className="ai-actions">
-                        <button type="button" className="primary-button" onClick={() => setConfirmingPr(true)}>Create Pull Request</button>
-                      </div>
-                    )}
-
-                    {confirmingPr && (
-                      <div className="repository-discovery">
-                        <p>Create a branch, commit the reviewed changes, push it to the repository, and open a Pull Request?</p>
-                        <div className="ai-actions">
-                          <button type="button" className="ghost-button" onClick={() => setConfirmingPr(false)}>Cancel</button>
-                          <button type="button" className="primary-button" onClick={handleCreatePr}>Create Pull Request</button>
-                        </div>
-                      </div>
-                    )}
-
-                    {prLoading && (
-                      <div className="repository-clone-progress">
-                        <div className="spinner-inline" aria-hidden="true" />
-                        <p className="muted">Creating branch, committing, pushing, and opening a pull request…</p>
-                      </div>
-                    )}
-
-                    {prError && <p className="connect-repo-error" role="alert">{prError}</p>}
-
-                    {prResult && (
-                      <div className="repository-discovery">
-                        <p className="detail-action-message">{prRequestLabel(prResult.provider)} created</p>
-                        <div className="repository-ask-answer">
-                          <span className="repository-meta-label">Branch</span>
-                          <p className="repository-commit-sha">{prResult.branchName}</p>
-                        </div>
-                        <div className="repository-ask-answer">
-                          <span className="repository-meta-label">Commit</span>
-                          <p className="repository-commit-sha">{prResult.commitSha}</p>
-                        </div>
-                        {prResult.prNumber !== undefined && (
-                          <div className="repository-ask-answer">
-                            <span className="repository-meta-label">{prRequestLabel(prResult.provider)}</span>
-                            <p>
-                              #{prResult.prNumber}
-                              {prResult.prUrl && (
-                                <>
-                                  {' — '}
-                                  <a href={prResult.prUrl} target="_blank" rel="noreferrer">{prResult.prUrl}</a>
-                                </>
-                              )}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
-              </>
-            )}
-          </div>
-        )}
+        <IssueSidebar
+          issue={issue}
+          scannedAt={scanMeta.scannedAt}
+          relatedLinks={NO_RELATED_LINKS}
+          fixProposed={aiFixProposal !== null}
+          fixReviewed={reviewResponse !== null}
+          prCreated={prResult !== null}
+        />
       </div>
     </div>
   );

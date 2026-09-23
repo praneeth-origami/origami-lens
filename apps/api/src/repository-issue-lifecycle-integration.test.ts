@@ -84,7 +84,7 @@ describe('Repository issue lifecycle — create -> analyze -> propose fix -> app
     const { indexStore, issueStore, analysisStore, proposalStore, repositoryId, commitSha, indexJobId, originalChunk } = await buildFixture();
 
     const issue = await createRepositoryIssue(
-      { id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' },
+      { id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' },
       { indexStore, issueStore },
       { repositoryId, ownerId: 'owner-a', title: 'Health score ignores weighting', description: 'calculateHealthScore uses a plain average, not weighted.', filePath: 'src/scoring/index.ts', symbol: 'calculateHealthScore' },
     );
@@ -130,7 +130,7 @@ describe('Repository issue lifecycle — create -> analyze -> propose fix -> app
 
   it('reject path: proposal and issue both become REJECTED, content still unchanged', async () => {
     const { indexStore, issueStore, analysisStore, proposalStore, repositoryId, commitSha, indexJobId } = await buildFixture();
-    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
+    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
 
     const analysisId = randomUUID();
     await analysisStore.create({ id: analysisId, issueId: issue.id, repositoryId, commitSha });
@@ -148,7 +148,7 @@ describe('Repository issue lifecycle — create -> analyze -> propose fix -> app
 
   it('duplicate protection: a second analyze request is blocked while one is already active', async () => {
     const { issueStore, analysisStore, indexStore, repositoryId, commitSha } = await buildFixture();
-    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
+    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
 
     await analysisStore.create({ id: randomUUID(), issueId: issue.id, repositoryId, commitSha });
     assert.equal(await analysisStore.hasActiveAnalysisAsync(issue.id), true);
@@ -156,7 +156,7 @@ describe('Repository issue lifecycle — create -> analyze -> propose fix -> app
 
   it('duplicate protection: a second propose-fix request is blocked while one is active or already proposed', async () => {
     const { proposalStore, repositoryId, commitSha, issueStore, indexStore } = await buildFixture();
-    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
+    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
 
     await proposalStore.create({ id: randomUUID(), issueId: issue.id, repositoryId, commitSha });
     assert.equal(await proposalStore.hasActiveProposalAsync(issue.id), true);
@@ -164,7 +164,7 @@ describe('Repository issue lifecycle — create -> analyze -> propose fix -> app
 
   it('cancellation: cancelling an in-progress analysis aborts the provider call and reverts the issue to OPEN', async () => {
     const { indexStore, issueStore, analysisStore, repositoryId, commitSha, indexJobId } = await buildFixture();
-    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
+    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
 
     const analysisId = randomUUID();
     await analysisStore.create({ id: analysisId, issueId: issue.id, repositoryId, commitSha });
@@ -189,7 +189,7 @@ describe('Repository issue lifecycle — create -> analyze -> propose fix -> app
 
   it('cancellation: cancelling an in-progress fix proposal marks it FAILED without ever completing', async () => {
     const { indexStore, issueStore, analysisStore, proposalStore, repositoryId, commitSha, indexJobId } = await buildFixture();
-    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
+    const issue = await createRepositoryIssue({ id: repositoryId, userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' }, { indexStore, issueStore }, { repositoryId, ownerId: 'owner-a', title: 'T', description: 'D' });
 
     const analysisId = randomUUID();
     await analysisStore.create({ id: analysisId, issueId: issue.id, repositoryId, commitSha });

@@ -56,7 +56,7 @@ describe('UnifiedRepositoryStore (Phase 16/B — real user ownership)', () => {
     await new Promise((r) => setTimeout(r, 5));
     const second = await store.create({ id: randomUUID(), userId, repoUrl: 'https://gitlab.com/gitlab-org/gitlab', provider: 'GITLAB', branch: 'main' });
 
-    const list = await store.listForUserAsync(userId);
+    const list = await store.listForOrganizationsAsync([userId]);
     assert.equal(list.length, 2);
     assert.equal(list[0].id, second.id);
     assert.equal(list[1].id, first.id);
@@ -79,11 +79,11 @@ describe('UnifiedRepositoryStore (Phase 16/B — real user ownership)', () => {
     await store.create({ id: randomUUID(), userId: userA, repoUrl: 'https://github.com/facebook/react', provider: 'GITHUB', branch: 'main' });
     await store.create({ id: randomUUID(), userId: userB, repoUrl: 'https://gitlab.com/gitlab-org/gitlab', provider: 'GITLAB', branch: 'main' });
 
-    const userAList = await store.listForUserAsync(userA);
+    const userAList = await store.listForOrganizationsAsync([userA]);
     assert.equal(userAList.length, 1);
     assert.equal(userAList[0].userId, userA);
 
-    const userBList = await store.listForUserAsync(userB);
+    const userBList = await store.listForOrganizationsAsync([userB]);
     assert.equal(userBList.length, 1);
     assert.equal(userBList[0].userId, userB);
   });
@@ -91,7 +91,7 @@ describe('UnifiedRepositoryStore (Phase 16/B — real user ownership)', () => {
   it('IDOR — getByIdForUserAsync returns the repository for its real owner', async () => {
     const userId = randomUUID();
     const created = await store.create({ id: randomUUID(), userId, repoUrl: 'https://github.com/facebook/react', provider: 'GITHUB', branch: 'main' });
-    const fetched = await store.getByIdForUserAsync(created.id, userId);
+    const fetched = await store.getByIdForOrganizationsAsync(created.id, [userId]);
     assert.equal(fetched?.id, created.id);
   });
 
@@ -100,10 +100,10 @@ describe('UnifiedRepositoryStore (Phase 16/B — real user ownership)', () => {
     const attackerUserId = randomUUID();
     const created = await store.create({ id: randomUUID(), userId: ownerUserId, repoUrl: 'https://github.com/facebook/react', provider: 'GITHUB', branch: 'main' });
 
-    const fetchedByAttacker = await store.getByIdForUserAsync(created.id, attackerUserId);
+    const fetchedByAttacker = await store.getByIdForOrganizationsAsync(created.id, [attackerUserId]);
     assert.equal(fetchedByAttacker, undefined, 'a repository must never be reachable by knowing its UUID alone');
 
-    const fetchedByOwner = await store.getByIdForUserAsync(created.id, ownerUserId);
+    const fetchedByOwner = await store.getByIdForOrganizationsAsync(created.id, [ownerUserId]);
     assert.equal(fetchedByOwner?.id, created.id, 'the real owner must still be able to fetch it');
   });
 

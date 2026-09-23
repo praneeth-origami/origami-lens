@@ -23,7 +23,7 @@ export class ScanPipeline {
     return this.pageRunner;
   }
 
-  async runScan(request: ScanRequest): Promise<ScanResponse> {
+  async runScan(request: ScanRequest, organizationId?: string): Promise<ScanResponse> {
     const scanId = randomUUID();
     const url = request.url;
     const scannedAt = new Date().toISOString();
@@ -63,6 +63,7 @@ export class ScanPipeline {
         issuesFound: result.issues.length,
       },
       ownerId: request.ownerId,
+      organizationId,
     };
 
     this.store.saveScan(response);

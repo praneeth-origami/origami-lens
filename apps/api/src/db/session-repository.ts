@@ -1,4 +1,4 @@
-import type { AuthUser, RepositoryProvider } from '@origami/contracts';
+import type { AuthProvider, AuthUser, Persona, PlatformRole } from '@origami/contracts';
 import { getPool } from './pool.js';
 
 export interface CreateSessionInput {
@@ -19,11 +19,15 @@ function rowToSessionWithUser(row: Record<string, unknown>): SessionWithUser {
     expiresAt: (row.expires_at as Date).toISOString(),
     user: {
       id: row.user_id as string,
-      primaryProvider: row.primary_provider as RepositoryProvider,
+      primaryProvider: row.primary_provider as AuthProvider,
       primaryProviderLogin: row.primary_provider_login as string,
       email: (row.email as string) ?? undefined,
       displayName: (row.display_name as string) ?? undefined,
       avatarUrl: (row.avatar_url as string) ?? undefined,
+      persona: (row.persona as Persona) ?? undefined,
+      platformRole: row.platform_role as PlatformRole,
+      createdAt: (row.created_at as Date).toISOString(),
+      activeOrganizationId: (row.active_organization_id as string) ?? undefined,
     },
   };
 }
@@ -88,5 +92,25 @@ export class SessionRepository {
     if (!pool) return 0;
     const result = await pool.query(`DELETE FROM sessions WHERE expires_at <= NOW()`);
     return result.rowCount ?? 0;
+  }
+
+  /** Phase 19 — the admin user-detail drawer's "last active" field. `last_used_at` (touched by getValidByIdAndTouch on every authenticated request) is the only per-request-refreshed timestamp in the system — see authorization's own doc comments on this same fact. */
+  async getLastActiveAt(userId: string): Promise<string | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+    const result = await pool.query(`SELECT MAX(last_used_at) AS last_used_at FROM sessions WHERE user_id = $1`, [userId]);
+    const value = result.rows[0]?.last_used_at as Date | null;
+    return value ? value.toISOString() : undefined;
+  }
+
+  /** Phase 19 — the Overview tab's "Active Users" count: distinct users with a non-expired session touched within the window. */
+  async countActiveSince(windowMinutes: number): Promise<number> {
+    const pool = getPool();
+    if (!pool) return 0;
+    const result = await pool.query(
+      `SELECT COUNT(DISTINCT user_id)::int AS count FROM sessions WHERE last_used_at > NOW() - ($1 || ' minutes')::interval AND expires_at > NOW()`,
+      [windowMinutes],
+    );
+    return (result.rows[0]?.count as number) ?? 0;
   }
 }

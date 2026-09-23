@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ScanArtifacts } from '@origami/contracts';
+import { Disclosure } from './Disclosure';
 
 interface Props {
   scanId: string;
@@ -10,20 +11,14 @@ export function ScreenshotViewer({ scanId, artifacts }: Props) {
   const shots = artifacts?.screenshots ?? [];
   const [active, setActive] = useState(shots[0]?.viewport ?? 'desktop');
 
-  if (shots.length === 0) {
-    return (
-      <section className="screenshot-viewer empty">
-        <h3>Page Screenshots</h3>
-        <p className="muted">No screenshots captured for this scan.</p>
-      </section>
-    );
-  }
+  // No empty placeholder — a scan with no captured screenshots simply
+  // doesn't show a screenshots section at all.
+  if (shots.length === 0) return null;
 
   const current = shots.find((s) => s.viewport === active) ?? shots[0];
 
   return (
-    <section className="screenshot-viewer">
-      <h3>Page Screenshots</h3>
+    <Disclosure title="Screenshots" meta={`${shots.length} viewport${shots.length === 1 ? '' : 's'}`}>
       <div className="screenshot-tabs">
         {shots.map((s) => (
           <button
@@ -43,6 +38,6 @@ export function ScreenshotViewer({ scanId, artifacts }: Props) {
         width={current.width}
         height={current.height}
       />
-    </section>
+    </Disclosure>
   );
 }

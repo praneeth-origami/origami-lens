@@ -112,6 +112,14 @@ export class ProviderConnectionRepository {
     return result.rows.map(rowToConnection);
   }
 
+  /** Scoped to userId so a caller can only ever look up their own connection — never pass an unchecked id straight from a route param. Used by the disconnect route to know the provider/installationId BEFORE deciding whether a real GitHub-side uninstall call is needed, without changing revokeForUser's existing behavior/signature. */
+  async findByIdForUser(userId: string, connectionId: string): Promise<ProviderConnection | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+    const result = await pool.query(`SELECT * FROM provider_connections WHERE id = $1 AND user_id = $2`, [connectionId, userId]);
+    return result.rows[0] ? rowToConnection(result.rows[0]) : undefined;
+  }
+
   /** Scoped to userId so a caller can only ever revoke their own connection — never pass an unchecked id straight from a route param. */
   async revokeForUser(userId: string, connectionId: string): Promise<boolean> {
     const pool = getPool();

@@ -1,6 +1,7 @@
 import * as esbuild from 'esbuild';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { renderIconPng } from './generate-icon.mjs';
 
 const watch = process.argv.includes('--watch');
 const outDir = path.join(import.meta.dirname, '..', 'dist');
@@ -16,15 +17,7 @@ function copyStatic() {
   }
   const iconsDir = path.join(outDir, 'icons');
   fs.mkdirSync(iconsDir, { recursive: true });
-  fs.writeFileSync(path.join(iconsDir, 'icon48.png'), createMinimalPng());
-}
-
-function createMinimalPng() {
-  // Minimal valid 1x1 purple PNG
-  return Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-    'base64',
-  );
+  fs.writeFileSync(path.join(iconsDir, 'icon48.png'), renderIconPng(48));
 }
 
 const buildOptions = {

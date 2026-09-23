@@ -82,6 +82,8 @@ export interface ComponentJobPayload {
   target: CodeTarget;
   evidence: ComponentEvidence;
   ownerId?: string;
+  /** The real ownership boundary (UX audit follow-up) — always the creating user's organization, resolved server-side, never client-supplied. Threaded through so the worker's own saveJob() calls never drop it from the in-memory fallback store. */
+  organizationId?: string;
 }
 
 interface JobControl {
@@ -155,6 +157,7 @@ async function processJob(
   const running: ComponentGenerationJob = {
     jobId: payload.jobId,
     ownerId: payload.ownerId,
+    organizationId: payload.organizationId ?? existing?.organizationId,
     sourceUrl: payload.sourceUrl,
     pageTitle: payload.pageTitle,
     target: payload.target,
@@ -342,19 +345,6 @@ export function startComponentGenerationWorker(
  * processJob() guard above still prevents it from ever overwriting the
  * CANCELLED status this function writes first.
  */
-/**
- * Best-effort ownership check using the same optional client-supplied
- * ownerId the rest of this API already relies on — there is no real
- * authentication/session system in this application (see the project
- * audit), so this is not a substitute for one. If the job has no owner
- * recorded, or the requester didn't supply one, there's nothing to check
- * against, matching every other /components route's current behavior.
- */
-export function canCancelJob(jobOwnerId: string | undefined, requestOwnerId: string | undefined): boolean {
-  if (jobOwnerId && requestOwnerId && jobOwnerId !== requestOwnerId) return false;
-  return true;
-}
-
 export async function cancelComponentJob(store: UnifiedComponentStore, jobId: string): Promise<ComponentGenerationJob | undefined> {
   const job = await store.getJobAsync(jobId);
   if (!job) return undefined;

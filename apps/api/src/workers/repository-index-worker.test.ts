@@ -156,6 +156,135 @@ describe('repository-index-worker processJob lifecycle', () => {
   });
 });
 
+describe('repository-index-worker notification emails', () => {
+  it('sends a repository-index-completed email to the repository owner on success', async () => {
+    const indexStore = new UnifiedRepositoryIndexStore();
+    const repositoryStore = new UnifiedRepositoryStore();
+    const cloneStore = new UnifiedRepositoryCloneStore();
+
+    const { repository, cloneJobId, commitSha } = await setupCompletedClone(repositoryStore, cloneStore, {
+      'src/a.ts': 'export const a = 1;\n',
+    });
+    const jobId = randomUUID();
+    await indexStore.create({ id: jobId, repositoryId: repository.id, cloneJobId, ownerId: repository.ownerId, commitSha });
+
+    const sent: { to: string; repoName: string; filesIndexed?: number }[] = [];
+    await processJob(indexStore, repositoryStore, cloneStore, { jobId, repositoryId: repository.id, cloneJobId, ownerId: repository.ownerId }, {
+      iterateFiles: (await import('../repository-discovery.js')).iterateRepositoryFiles,
+      processFile: (await import('../repository-index-service.js')).processRepositoryFile,
+      getUserById: async () => ({ email: 'owner@example.com' }),
+      sendRepositoryIndexCompletedEmail: async (to, data) => { sent.push({ to, repoName: data.repoName, filesIndexed: data.filesIndexed }); },
+      webAppBaseUrl: 'http://localhost:5173',
+    });
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, 'owner@example.com');
+    assert.equal(sent[0].repoName, 'octocat/Hello-World');
+    assert.equal(sent[0].filesIndexed, 1);
+  });
+
+  it('sends a repository-index-failed email (with the error message) when indexing fails', async () => {
+    const indexStore = new UnifiedRepositoryIndexStore();
+    const repositoryStore = new UnifiedRepositoryStore();
+    const cloneStore = new UnifiedRepositoryCloneStore();
+
+    const ownerId = `owner-${randomUUID()}`;
+    const repository = await repositoryStore.create({ id: randomUUID(), userId: ownerId, repoUrl: REAL_ALLOWLISTED_URL, provider: 'GITHUB', branch: 'main' });
+    await repositoryStore.updateStatus(repository.id, 'READY_FOR_INDEXING');
+    const jobId = randomUUID();
+    const bogusCloneJobId = randomUUID();
+    await indexStore.create({ id: jobId, repositoryId: repository.id, cloneJobId: bogusCloneJobId, ownerId, commitSha: 'deadbeef' });
+
+    const sent: { to: string; errorMessage?: string }[] = [];
+    await processJob(indexStore, repositoryStore, cloneStore, { jobId, repositoryId: repository.id, cloneJobId: bogusCloneJobId, ownerId }, {
+      iterateFiles: (await import('../repository-discovery.js')).iterateRepositoryFiles,
+      processFile: (await import('../repository-index-service.js')).processRepositoryFile,
+      getUserById: async () => ({ email: 'owner@example.com' }),
+      sendRepositoryIndexFailedEmail: async (to, data) => { sent.push({ to, errorMessage: data.errorMessage }); },
+      webAppBaseUrl: 'http://localhost:5173',
+    });
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, 'owner@example.com');
+    assert.match(sent[0].errorMessage ?? '', /no successful clone/i);
+  });
+
+  it('sends nothing when the job is cancelled — that is a deliberate user action, not news', async () => {
+    const indexStore = new UnifiedRepositoryIndexStore();
+    const repositoryStore = new UnifiedRepositoryStore();
+    const cloneStore = new UnifiedRepositoryCloneStore();
+
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 20; i++) files[`src/file${i}.ts`] = `export function fn${i}() { return ${i}; }\n`;
+    const { repository, cloneJobId, commitSha } = await setupCompletedClone(repositoryStore, cloneStore, files);
+    const jobId = randomUUID();
+    await indexStore.create({ id: jobId, repositoryId: repository.id, cloneJobId, ownerId: repository.ownerId, commitSha });
+
+    const { processRepositoryFile } = await import('../repository-index-service.js');
+    const { iterateRepositoryFiles } = await import('../repository-discovery.js');
+    const slowProcessFile: typeof processRepositoryFile = async (entry, context, limits) => {
+      await new Promise((r) => setTimeout(r, 15));
+      return processRepositoryFile(entry, context, limits);
+    };
+
+    let completedCalls = 0;
+    let failedCalls = 0;
+    const jobPromise = processJob(
+      indexStore,
+      repositoryStore,
+      cloneStore,
+      { jobId, repositoryId: repository.id, cloneJobId, ownerId: repository.ownerId },
+      {
+        iterateFiles: iterateRepositoryFiles,
+        processFile: slowProcessFile,
+        getUserById: async () => ({ email: 'owner@example.com' }),
+        sendRepositoryIndexCompletedEmail: async () => { completedCalls += 1; },
+        sendRepositoryIndexFailedEmail: async () => { failedCalls += 1; },
+        webAppBaseUrl: 'http://localhost:5173',
+      },
+    );
+
+    const pollStart = Date.now();
+    let runningJob = await indexStore.getByIdAsync(jobId);
+    while (runningJob?.status !== 'RUNNING' && Date.now() - pollStart < 2000) {
+      await new Promise((r) => setTimeout(r, 5));
+      runningJob = await indexStore.getByIdAsync(jobId);
+    }
+    await cancelRepositoryIndexJob(indexStore, repositoryStore, jobId);
+    await jobPromise;
+
+    const job = await indexStore.getByIdAsync(jobId);
+    assert.equal(job?.status, 'CANCELLED');
+    assert.equal(completedCalls, 0);
+    assert.equal(failedCalls, 0);
+  });
+
+  it('never throws and still finalizes the job even when the notification email send fails', async () => {
+    const indexStore = new UnifiedRepositoryIndexStore();
+    const repositoryStore = new UnifiedRepositoryStore();
+    const cloneStore = new UnifiedRepositoryCloneStore();
+
+    const { repository, cloneJobId, commitSha } = await setupCompletedClone(repositoryStore, cloneStore, { 'a.ts': 'export const a = 1;\n' });
+    const jobId = randomUUID();
+    await indexStore.create({ id: jobId, repositoryId: repository.id, cloneJobId, ownerId: repository.ownerId, commitSha });
+
+    const { iterateRepositoryFiles } = await import('../repository-discovery.js');
+    const { processRepositoryFile } = await import('../repository-index-service.js');
+    await assert.doesNotReject(() =>
+      processJob(indexStore, repositoryStore, cloneStore, { jobId, repositoryId: repository.id, cloneJobId, ownerId: repository.ownerId }, {
+        iterateFiles: iterateRepositoryFiles,
+        processFile: processRepositoryFile,
+        getUserById: async () => ({ email: 'owner@example.com' }),
+        sendRepositoryIndexCompletedEmail: async () => { throw new Error('SMTP down'); },
+        webAppBaseUrl: 'http://localhost:5173',
+      }),
+    );
+
+    const job = await indexStore.getByIdAsync(jobId);
+    assert.equal(job?.status, 'COMPLETED');
+  });
+});
+
 describe('repository-index-worker cancellation', () => {
   it('TEST 38/39 — cancelling a RUNNING index job stops it, deletes partial rows, marks CANCELLED, and reverts the repository to READY_FOR_INDEXING', async () => {
     const indexStore = new UnifiedRepositoryIndexStore();

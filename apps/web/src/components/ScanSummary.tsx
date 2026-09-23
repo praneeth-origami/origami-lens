@@ -1,6 +1,10 @@
-import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import type { IssueCategory, ScanListItem, ScanResponse } from '@origami/contracts';
 import { CATEGORY_LABEL } from '../api/client';
+import { ReportExportMenu } from './ReportExportMenu';
+import { ReportShareButton } from './ReportShareModal';
+import { AnimatedScoreRing } from './AnimatedScoreRing';
+import { AnimatedProgressBar } from './AnimatedProgressBar';
 
 interface Props {
   scan: ScanResponse & { issuesByCategory?: Record<string, number> };
@@ -31,50 +35,22 @@ interface ScanSummaryProps extends Props {
   onSelectScan: (scanId: string) => void;
 }
 
+const REPORT_READY_STATUSES = new Set(['COMPLETED', 'COMPLETED_WITH_WARNINGS']);
+
 export function ScanSummary({ scan, scans, activeScanId, onSelectScan }: ScanSummaryProps) {
-  const [actionMessage, setActionMessage] = useState('');
   const host = hostnameOf(scan.url);
+  const reportReady = REPORT_READY_STATUSES.has(scan.status ?? 'COMPLETED');
+  const disabledReason = reportReady ? undefined : 'This scan has not completed successfully yet, so it has no report to share or export.';
 
   const scannedDate = new Date(scan.scannedAt).toLocaleString(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
 
-  const handleShare = async () => {
-    const shareUrl = window.location.href;
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: `${host} — Origami Lens`, text: `Website health report for ${host}`, url: shareUrl });
-        setActionMessage('Shared successfully.');
-        return;
-      }
-      if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(shareUrl);
-        setActionMessage('Report link copied to clipboard.');
-        return;
-      }
-      setActionMessage('Sharing is not available in this browser.');
-    } catch {
-      setActionMessage('Share cancelled or unavailable.');
-    } finally {
-      setTimeout(() => setActionMessage(''), 3000);
-    }
-  };
-
-  const handleExport = () => {
-    const blob = new Blob([JSON.stringify(scan, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `origami-lens-${host}-${scan.scanId.slice(0, 8)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setActionMessage('Report exported as JSON.');
-    setTimeout(() => setActionMessage(''), 3000);
-  };
-
   return (
     <section className="scan-summary animate-in">
+      <Link to="/scans" className="back-link">← Back to Scans</Link>
+
       <div className="scan-summary-topbar">
         <div className="scan-summary-brand">
           <div className="site-thumb" aria-hidden="true" />
@@ -101,22 +77,14 @@ export function ScanSummary({ scan, scans, activeScanId, onSelectScan }: ScanSum
         </div>
 
         <div className="scan-summary-actions">
-          {actionMessage && <span className="detail-action-message">{actionMessage}</span>}
-          <button type="button" className="ghost-button" onClick={handleShare}>Share</button>
-          <button type="button" className="primary-button" onClick={handleExport}>Export Report</button>
+          <ReportShareButton scanId={scan.scanId} disabled={!reportReady} disabledReason={disabledReason} />
+          <ReportExportMenu scanId={scan.scanId} disabled={!reportReady} disabledReason={disabledReason} />
         </div>
       </div>
 
       <div className="scan-summary-meta">
         <div className={`status-pill ${(scan.status ?? 'COMPLETED').toLowerCase()}`}>{scan.status ?? 'Completed'}</div>
         <div className="scan-meta-text">Scanned {relativeTime(scan.scannedAt)} · {scannedDate}</div>
-      </div>
-
-      <div className="severity-summary">
-        <span className="badge critical">Critical {scan.summary.critical}</span>
-        <span className="badge high">High {scan.summary.high}</span>
-        <span className="badge medium">Medium {scan.summary.medium}</span>
-        <span className="badge low">Low {scan.summary.low}</span>
       </div>
     </section>
   );
@@ -127,69 +95,37 @@ export function HealthScoreCard({ scan }: Props) {
   const level = score >= 90 ? 'Excellent' : score >= 75 ? 'Good' : score >= 60 ? 'Fair' : 'Needs Attention';
   const tier = score >= 90 ? 'good' : score >= 75 ? 'good' : score >= 60 ? 'fair' : 'poor';
 
+  return <AnimatedScoreRing score={score} tier={tier} statusLabel={level} ariaLabel={`Health score ${score} out of 100, ${level}`} />;
+}
+
+/**
+ * The single consolidated "what's the state of this scan" strip — health
+ * score, the same critical/high/medium/low counts previously repeated in
+ * three separate places on this page (ScanSummary's badge row, this, and
+ * the Issues section's own summary cards), plus the couple of scan-identity
+ * facts (pages scanned, last-scan time) that used to be their own 3 large
+ * metric cards. All real values already computed server-side — nothing
+ * calculated here, just presented once instead of three times.
+ */
+export function HealthSummary({ scan }: Props) {
+  const isWebsite = scan.scanType === 'WEBSITE';
+  const pagesLabel = isWebsite
+    ? `${scan.progress?.completedPages ?? scan.pages?.length ?? 0}/${scan.progress?.discoveredPages ?? scan.pages?.length ?? 0} pages scanned`
+    : '1 page scanned';
+
   return (
-    <section className="health-card sweep-card">
-      <div className="section-label-row">
-        <h2>Website Health Score</h2>
-      </div>
+    <section className="health-summary animate-in">
+      <HealthScoreCard scan={scan} />
 
-      <div className="health-score-visual">
-        <div
-          className="score-ring"
-          data-tier={tier}
-          style={{ ['--score' as string]: `${score}` }}
-          aria-label={`Health score ${score} out of 100`}
-        >
-          <div className="score-ring-inner">
-            <div className="score-number">{score}</div>
-            <div className="score-status">{level}</div>
-          </div>
-        </div>
-
-        <div className="health-score-copy">
-          <p>
-            Your website is {score >= 85 ? 'in good shape!' : score >= 60 ? 'okay, but needs attention.' : 'in need of attention.'}
-          </p>
-          <small>
-            {scan.summary.totalIssues === 0
-              ? 'No issues found on this scan.'
-              : `We found ${scan.summary.totalIssues} issue${scan.summary.totalIssues === 1 ? '' : 's'} across 7 categories that can be improved.`}
-          </small>
+      <div className="health-summary-side">
+        <IssueSummaryCards scan={scan} />
+        <div className="health-summary-meta">
+          <span>{pagesLabel}</span>
+          <span aria-hidden="true">·</span>
+          <span>Last scan {relativeTime(scan.scannedAt)}</span>
         </div>
       </div>
     </section>
-  );
-}
-
-export function KeyMetrics({ scan }: Props) {
-  const isWebsite = scan.scanType === 'WEBSITE';
-  const pagesLabel = isWebsite
-    ? `${scan.progress?.completedPages ?? scan.pages?.length ?? 0} / ${scan.progress?.discoveredPages ?? scan.pages?.length ?? 0}`
-    : '1';
-  const pagesSub = isWebsite ? 'pages scanned' : 'page scanned';
-
-  return (
-    <div className="key-metrics">
-      <div className="metric-card">
-        <span className="metric-value">{scan.summary.totalIssues}</span>
-        <span className="metric-label">Total Issues</span>
-        <span className="metric-sub">
-          {scan.summary.critical > 0 || scan.summary.high > 0
-            ? `${scan.summary.critical} critical · ${scan.summary.high} high`
-            : 'No critical or high issues'}
-        </span>
-      </div>
-      <div className="metric-card">
-        <span className="metric-value">{pagesLabel}</span>
-        <span className="metric-label">{pagesSub}</span>
-        <span className="metric-sub">{isWebsite ? (scan.discoveryMethod ?? 'Automatic discovery') : 'Current page scan'}</span>
-      </div>
-      <div className="metric-card">
-        <span className="metric-value">{relativeTime(scan.scannedAt)}</span>
-        <span className="metric-label">Last Scan</span>
-        <span className="metric-sub">{scan.status ?? 'Completed'}</span>
-      </div>
-    </div>
   );
 }
 
@@ -219,9 +155,12 @@ export function CategoryScoreList({ scan, onSelectCategory }: CategoryProps) {
                 {typeof count === 'number' && count > 0 && <span className="cat-issue-count">{count}</span>}
               </div>
               <div className="category-progress-wrap">
-                <div className="category-progress-track">
-                  <span className="category-progress-fill" data-key={key} style={{ width: `${data.score}%` }} />
-                </div>
+                <AnimatedProgressBar
+                  percent={data.score}
+                  dataKey={key}
+                  trackClassName="category-progress-track"
+                  fillClassName="category-progress-fill"
+                />
                 <span className="cat-score">{data.score}</span>
               </div>
             </>
