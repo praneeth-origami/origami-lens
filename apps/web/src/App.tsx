@@ -7,6 +7,9 @@ import { PageScanDetailPage } from './pages/PageScanDetailPage';
 import { ComponentDetailPage } from './pages/ComponentDetailPage';
 import { ScansListPage } from './pages/ScansListPage';
 import { ComponentsListPage } from './pages/ComponentsListPage';
+import { RepositoriesListPage } from './pages/RepositoriesListPage';
+import { RepositoryDetailPage } from './pages/RepositoryDetailPage';
+import { RepositoryIssueDetailPage } from './pages/RepositoryIssueDetailPage';
 
 export default function App() {
   return (
@@ -22,6 +25,9 @@ export default function App() {
           <Route path="/issues/:issueId" element={<IssueDetailPage />} />
           <Route path="/components" element={<ComponentsListPage />} />
           <Route path="/components/:jobId" element={<ComponentDetailPage />} />
+          <Route path="/repositories" element={<RepositoriesListPage />} />
+          <Route path="/repositories/:id" element={<RepositoryDetailPage />} />
+          <Route path="/repositories/:id/issues/:issueId" element={<RepositoryIssueDetailPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
