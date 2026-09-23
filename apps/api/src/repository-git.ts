@@ -46,11 +46,44 @@ export function sanitizeGitError(message: string): string {
 export class GitCloneError extends Error {
   constructor(
     message: string,
-    public readonly cause: 'branch_not_found' | 'aborted' | 'git_error',
+    public readonly cause: 'branch_not_found' | 'aborted' | 'git_error' | 'auth_failed',
   ) {
     super(message);
     this.name = 'GitCloneError';
   }
+}
+
+/** A credential for one remote git operation — never persisted, never logged (see buildAuthHeaderArgs/scrubGitCredentials). Same shape pushBranch has always taken as separate arguments; introduced here as an object purely because clone/branchExistsOnRemote/getRemoteDefaultBranch are all optional (most calls are still for public repos and pass none). */
+export interface GitCredentials {
+  token: string;
+  username?: string;
+}
+
+/**
+ * Builds the same per-invocation `http.extraheader` Basic-auth args pushBranch
+ * has always used — [] when no credentials are given, so every caller that
+ * never had (or needed) auth keeps its exact prior argv and behavior.
+ *
+ * Bugfix: also disables `credential.helper` for this one invocation
+ * (`-c credential.helper=`, an empty value, per-invocation only — never
+ * written to `.git/config`). Without this, a system/global credential
+ * helper — Git Credential Manager (`credential.helper=manager`) is the
+ * Windows Git default and was in fact configured on the machine this was
+ * found on — that already holds a cached credential for the same host
+ * supplies its OWN Authorization header via libcurl's auth phase, on top of
+ * the explicit `http.extraheader` set below. Git sends both: `http.extraheader`
+ * is a cumulative multi-value config key, so the request ends up carrying
+ * two literal `Authorization` headers. GitHub's HTTP layer rejects that
+ * outright with `400 Duplicate header: "Authorization"` — confirmed live,
+ * this is exactly the error `branchExistsOnRemote` surfaced. Clearing the
+ * helper for this invocation ensures the explicit header is the only one
+ * git ever sends, regardless of what credential helpers are configured on
+ * the host running this.
+ */
+function buildAuthHeaderArgs(credentials?: GitCredentials): string[] {
+  if (!credentials) return [];
+  const basicAuth = Buffer.from(`${credentials.username ?? 'x-access-token'}:${credentials.token}`).toString('base64');
+  return ['-c', 'credential.helper=', '-c', `http.extraheader=AUTHORIZATION: basic ${basicAuth}`];
 }
 
 /**
@@ -95,16 +128,41 @@ const NO_LINE_ENDING_CONVERSION = ['-c', 'core.autocrlf=false', '-c', 'core.safe
  * byte-identical to the real Git blob — see that constant's doc comment
  * (Step 13A) for why this matters for the fix-application/commit pipeline.
  */
-export async function cloneRepository(repoUrl: string, branch: string, targetDir: string, signal: AbortSignal): Promise<void> {
+export async function cloneRepository(repoUrl: string, branch: string, targetDir: string, signal: AbortSignal, credentials?: GitCredentials): Promise<void> {
   try {
-    await run(['clone', ...NO_LINE_ENDING_CONVERSION, '--branch', branch, '--single-branch', '--depth', '1', '--no-tags', '--quiet', '--', repoUrl, targetDir], { signal });
+    await run(
+      ['clone', ...NO_LINE_ENDING_CONVERSION, ...buildAuthHeaderArgs(credentials), '--branch', branch, '--single-branch', '--depth', '1', '--no-tags', '--quiet', '--', repoUrl, targetDir],
+      { signal },
+    );
+    // Bugfix: unlike fetch/push/ls-remote (where `-c key=value` is purely
+    // transient), `git clone -c http.extraheader=...` writes that value into
+    // the NEW repository's own `.git/config` as `[http] extraheader = ...` —
+    // confirmed live, with a real token sitting in it on disk afterward,
+    // directly contradicting this module's "never written to .git/config"
+    // intent (see buildAuthHeaderArgs's doc comment). Left in place, it also
+    // breaks every later authenticated call: `http.extraheader` is a
+    // cumulative multi-value config key, so branchExistsOnRemote/pushBranch's
+    // own per-invocation `-c http.extraheader=...` (via buildAuthHeaderArgs)
+    // stacks on top of this persisted one, and git sends BOTH — which
+    // GitHub's HTTP layer now hard-rejects as `400 Duplicate header:
+    // "Authorization"`. Stripping it immediately after a successful
+    // authenticated clone closes both problems: no credential is left on
+    // disk, and every later invocation's own explicit header is the only one
+    // git ever sends.
+    if (credentials) {
+      await run(['-C', targetDir, 'config', '--unset-all', 'http.extraheader'], { signal }).catch(() => {});
+    }
   } catch (error) {
     if (signal.aborted) {
       throw new GitCloneError('Clone aborted', 'aborted');
     }
-    const stderr = sanitizeGitError((error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : String(error)));
+    const rawStderr = (error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : String(error));
+    const stderr = scrubGitCredentials(sanitizeGitError(rawStderr), credentials ? [credentials.token] : []);
     if (/remote branch .* not found|couldn't find remote ref|not found in upstream/i.test(stderr)) {
       throw new GitCloneError(`Branch '${branch}' does not exist on this repository.`, 'branch_not_found');
+    }
+    if (credentials && /authentication failed|401|403|could not read username/i.test(stderr)) {
+      throw new GitCloneError(`Git clone authentication failed: ${stderr}`, 'auth_failed');
     }
     throw new GitCloneError(`Git clone failed: ${stderr}`, 'git_error');
   }
@@ -204,22 +262,23 @@ export async function createBranch(repoDir: string, branchName: string, signal?:
 }
 
 /** `git ls-remote --exit-code --heads origin <branch>` — exit code 2 means "no such ref", which execFile reports as a non-zero-exit error; that specific case is treated as "does not exist" rather than an error. Any OTHER failure (auth, network) is surfaced as remote_unavailable. */
-export async function branchExistsOnRemote(repoDir: string, branchName: string, signal?: AbortSignal): Promise<boolean> {
+export async function branchExistsOnRemote(repoDir: string, branchName: string, signal?: AbortSignal, credentials?: GitCredentials): Promise<boolean> {
   try {
-    const { stdout } = await run(['-C', repoDir, 'ls-remote', '--exit-code', '--heads', 'origin', branchName], { signal });
+    const { stdout } = await run(['-C', repoDir, ...buildAuthHeaderArgs(credentials), 'ls-remote', '--exit-code', '--heads', 'origin', branchName], { signal });
     return stdout.trim().length > 0;
   } catch (error) {
     const code = (error as { code?: number }).code;
     if (code === 2) return false;
-    const stderr = sanitizeGitError((error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : String(error)));
+    const rawStderr = (error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : String(error));
+    const stderr = scrubGitCredentials(sanitizeGitError(rawStderr), credentials ? [credentials.token] : []);
     throw new GitWorkflowError(`Failed to check the remote for an existing branch: ${stderr}`, 'remote_unavailable');
   }
 }
 
 /** `git ls-remote --symref origin HEAD` — resolves the remote's actual default branch without a full clone/fetch. Returns undefined if the remote's default branch cannot be determined (caller falls back to a configured/heuristic default). */
-export async function getRemoteDefaultBranch(repoDir: string, signal?: AbortSignal): Promise<string | undefined> {
+export async function getRemoteDefaultBranch(repoDir: string, signal?: AbortSignal, credentials?: GitCredentials): Promise<string | undefined> {
   try {
-    const { stdout } = await run(['-C', repoDir, 'ls-remote', '--symref', 'origin', 'HEAD'], { signal });
+    const { stdout } = await run(['-C', repoDir, ...buildAuthHeaderArgs(credentials), 'ls-remote', '--symref', 'origin', 'HEAD'], { signal });
     const match = stdout.match(/ref:\s*refs\/heads\/(\S+)\s+HEAD/);
     return match?.[1];
   } catch {
@@ -268,16 +327,17 @@ export async function commitStaged(repoDir: string, message: string, authorName:
  * every pre-Phase-13 call site — which only ever pushed to GitHub and never
  * passed a 5th argument — keeps its exact original behavior unchanged.
  * Phase 13's other providers pass their own convention explicitly (see
- * RepositoryProviderClient.getPushCredentials): GitLab uses `oauth2`,
- * Bitbucket requires the real account username paired with an app
- * password. This function itself has no provider-specific knowledge — it
- * only ever builds a Basic-auth header from whatever it's given.
+ * RepositoryProviderClient.getPushCredentials): GitLab uses `oauth2`;
+ * Bitbucket uses `x-token-auth` for its production OAuth path, or the real
+ * account username only for the legacy App Password fallback. This function
+ * itself has no provider-specific knowledge — it only ever builds a
+ * Basic-auth header from whatever it's given.
  */
 export async function pushBranch(repoDir: string, branchName: string, token: string, signal?: AbortSignal, username = 'x-access-token'): Promise<void> {
   const basicAuth = Buffer.from(`${username}:${token}`).toString('base64');
   try {
     await run(
-      ['-C', repoDir, '-c', `http.extraheader=AUTHORIZATION: basic ${basicAuth}`, 'push', '--set-upstream', 'origin', '--', branchName],
+      ['-C', repoDir, ...buildAuthHeaderArgs({ token, username }), 'push', '--set-upstream', 'origin', '--', branchName],
       { signal },
     );
   } catch (error) {

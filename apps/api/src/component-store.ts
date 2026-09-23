@@ -41,8 +41,39 @@ export class ComponentJobStore {
     return this.jobs.get(jobId);
   }
 
+  /** The authorization-aware lookup for the no-Postgres fallback path: undefined for "doesn't exist" and "exists but isn't yours" identically. */
+  getJobForOrganizations(jobId: string, organizationIds: string[]): ComponentGenerationJob | undefined {
+    const job = this.jobs.get(jobId);
+    return job && job.organizationId && organizationIds.includes(job.organizationId) ? job : undefined;
+  }
+
   listJobs(): ComponentJobListItem[] {
     return Array.from(this.jobs.values())
+      .map((j) => ({
+        jobId: j.jobId,
+        sourceUrl: j.sourceUrl,
+        componentName: j.result?.componentName,
+        target: j.target,
+        status: j.status,
+        createdAt: j.createdAt,
+      }))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  /** Scoped to organizationIds so a caller can only ever delete their own job — mirrors UnifiedRepositoryStore's deleteForOrganizations. Returns false for "doesn't exist" and "exists but isn't yours" identically. */
+  deleteForOrganizations(jobId: string, organizationIds: string[]): boolean {
+    const job = this.jobs.get(jobId);
+    if (!job || !job.organizationId || !organizationIds.includes(job.organizationId)) return false;
+    this.jobs.delete(jobId);
+    this.evidenceByJobId.delete(jobId);
+    this.persistToDisk();
+    return true;
+  }
+
+  /** The only listing a real, authenticated caller ever gets for the no-Postgres fallback path: always scoped to every organization they belong to (unlike listJobs() above, which ignores ownership entirely). */
+  listJobsForOrganizations(organizationIds: string[]): ComponentJobListItem[] {
+    return Array.from(this.jobs.values())
+      .filter((j) => j.organizationId && organizationIds.includes(j.organizationId))
       .map((j) => ({
         jobId: j.jobId,
         sourceUrl: j.sourceUrl,

@@ -26,6 +26,8 @@ interface CreateScanInput {
   scanType: ScanType;
   rootUrl: string;
   ownerId?: string;
+  /** The real ownership boundary (see migration 018) — always the creating user's organization, resolved server-side, never client-supplied. */
+  organizationId?: string;
   discoveryMethod?: DiscoveryMethod;
   maxPages?: number;
   status?: ScanStatus;
@@ -41,14 +43,15 @@ export class ScanRepository {
     if (!pool) throw new Error('Database not configured');
 
     await pool.query(
-      `INSERT INTO scans (id, scan_type, status, root_url, owner_id, discovery_method, max_pages, progress_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO scans (id, scan_type, status, root_url, owner_id, organization_id, discovery_method, max_pages, progress_json)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         input.scanId,
         input.scanType,
         input.status ?? 'QUEUED',
         input.rootUrl,
         input.ownerId ?? null,
+        input.organizationId ?? null,
         input.discoveryMethod ?? null,
         input.maxPages ?? null,
         JSON.stringify({ discoveredPages: 0, completedPages: 0, failedPages: 0, issuesFound: 0 }),
@@ -263,9 +266,9 @@ export class ScanRepository {
     if (!pool) return;
 
     await pool.query(
-      `INSERT INTO scans (id, scan_type, status, root_url, owner_id, progress_json, health_score_json,
+      `INSERT INTO scans (id, scan_type, status, root_url, owner_id, organization_id, progress_json, health_score_json,
        summary_json, ai_summary_json, evidence_summary_json, artifacts_json, scanned_at)
-       VALUES ($1, 'CURRENT_PAGE', 'COMPLETED', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       VALUES ($1, 'CURRENT_PAGE', 'COMPLETED', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO UPDATE SET
          health_score_json = EXCLUDED.health_score_json,
          summary_json = EXCLUDED.summary_json,
@@ -278,6 +281,7 @@ export class ScanRepository {
         response.scanId,
         response.url,
         response.ownerId ?? null,
+        response.organizationId ?? null,
         JSON.stringify(response.progress ?? { discoveredPages: 1, completedPages: 1, failedPages: 0, issuesFound: response.issues.length }),
         JSON.stringify(response.healthScore),
         JSON.stringify(response.summary),
@@ -360,8 +364,40 @@ export class ScanRepository {
       failedPages: failedPages && failedPages.length > 0 ? failedPages : undefined,
       discoveryMethod: row.discovery_method ?? undefined,
       ownerId: row.owner_id ?? undefined,
+      organizationId: row.organization_id ?? undefined,
       error: row.error ?? undefined,
     };
+  }
+
+  /**
+   * Deletes a scan and everything under it (page_scans, issues,
+   * issue_occurrences — all ON DELETE CASCADE, see migration 001) in one
+   * statement, but only if it belongs to one of the caller's organizations.
+   * Returns false for "doesn't exist" and "exists but isn't yours"
+   * identically — same generic-404 convention as every other
+   * ForOrganizations method, just expressed as a boolean since there's no
+   * row left to return. Screenshot files on disk are NOT touched here —
+   * see artifact-store.ts's deleteScanArtifacts, which the caller (index.ts)
+   * invokes separately after this succeeds.
+   */
+  async deleteScanForOrganizations(scanId: string, organizationIds: string[]): Promise<boolean> {
+    if (organizationIds.length === 0) return false;
+    const pool = getPool();
+    if (!pool) return false;
+
+    const result = await pool.query(`DELETE FROM scans WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [scanId, organizationIds]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  /** The authorization-aware lookup — filters at the SQL layer so a scan belonging to another organization never leaves the database. Returns undefined for "doesn't exist" and "exists but isn't yours" identically. */
+  async getScanForOrganizations(scanId: string, organizationIds: string[]): Promise<ScanResponse | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const result = await pool.query(`SELECT id FROM scans WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [scanId, organizationIds]);
+    if (result.rows.length === 0) return undefined;
+    return this.getScan(scanId);
   }
 
   async getScanStatus(scanId: string): Promise<{
@@ -392,6 +428,35 @@ export class ScanRepository {
     };
   }
 
+  async getScanStatusForOrganizations(scanId: string, organizationIds: string[]): Promise<{
+    scanId: string;
+    scanType: ScanType;
+    status: ScanStatus;
+    progress: ScanProgress;
+    healthScore?: object;
+    error?: string;
+  } | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const result = await pool.query(
+      `SELECT id, scan_type, status, progress_json, health_score_json, error FROM scans WHERE id = $1 AND organization_id = ANY($2::uuid[])`,
+      [scanId, organizationIds],
+    );
+    if (result.rows.length === 0) return undefined;
+
+    const row = result.rows[0];
+    return {
+      scanId: row.id,
+      scanType: row.scan_type,
+      status: row.status,
+      progress: row.progress_json,
+      healthScore: row.health_score_json ?? undefined,
+      error: row.error ?? undefined,
+    };
+  }
+
   async listScans(): Promise<ScanListItem[]> {
     const pool = getPool();
     if (!pool) return [];
@@ -406,6 +471,37 @@ export class ScanRepository {
       url: row.root_url,
       overallScore: row.health_score_json?.overallScore ?? 0,
       totalIssues: row.summary_json?.totalIssues ?? 0,
+      critical: row.summary_json?.critical,
+      high: row.summary_json?.high,
+      medium: row.summary_json?.medium,
+      low: row.summary_json?.low,
+      scannedAt: (row.scanned_at ?? row.created_at).toISOString(),
+      scanType: row.scan_type,
+      status: row.status,
+    }));
+  }
+
+  /** The only listing a real, authenticated caller ever gets — always scoped to every organization they belong to, never an optional filter. */
+  async listScansForOrganizations(organizationIds: string[]): Promise<ScanListItem[]> {
+    if (organizationIds.length === 0) return [];
+    const pool = getPool();
+    if (!pool) return [];
+
+    const result = await pool.query(
+      `SELECT id, root_url, scan_type, status, health_score_json, summary_json, scanned_at, created_at
+       FROM scans WHERE organization_id = ANY($1::uuid[]) ORDER BY COALESCE(scanned_at, created_at) DESC LIMIT 100`,
+      [organizationIds],
+    );
+
+    return result.rows.map((row) => ({
+      scanId: row.id,
+      url: row.root_url,
+      overallScore: row.health_score_json?.overallScore ?? 0,
+      totalIssues: row.summary_json?.totalIssues ?? 0,
+      critical: row.summary_json?.critical,
+      high: row.summary_json?.high,
+      medium: row.summary_json?.medium,
+      low: row.summary_json?.low,
       scannedAt: (row.scanned_at ?? row.created_at).toISOString(),
       scanType: row.scan_type,
       status: row.status,
@@ -413,6 +509,17 @@ export class ScanRepository {
   }
 
   async getPageScans(scanId: string): Promise<PageScanRecord[]> {
+    return this.loadPageScans(scanId);
+  }
+
+  /** Returns undefined for "scan doesn't exist or isn't yours" (generic 404), an empty array for "yours, but no pages yet." */
+  async getPageScansForOrganizations(scanId: string, organizationIds: string[]): Promise<PageScanRecord[] | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const owned = await pool.query(`SELECT id FROM scans WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [scanId, organizationIds]);
+    if (owned.rows.length === 0) return undefined;
     return this.loadPageScans(scanId);
   }
 
@@ -439,6 +546,19 @@ export class ScanRepository {
       page: this.rowToPageScan(row),
       issues: issuesResult.rows.map((r) => this.rowToIssue(r)),
     };
+  }
+
+  async getPageScanDetailForOrganizations(scanId: string, pageScanId: string, organizationIds: string[]): Promise<{
+    page: PageScanRecord;
+    issues: Issue[];
+  } | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const owned = await pool.query(`SELECT id FROM scans WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [scanId, organizationIds]);
+    if (owned.rows.length === 0) return undefined;
+    return this.getPageScanDetail(scanId, pageScanId);
   }
 
   async getIssue(issueId: string): Promise<{ issue: Issue | AggregatedIssue; scan: ScanResponse } | undefined> {
@@ -474,6 +594,14 @@ export class ScanRepository {
     return { issue: this.rowToIssue(issueRow), scan };
   }
 
+  /** The authorization-aware lookup — an issue belongs to whichever scan found it, so ownership is checked via that scan's organization_id. Returns undefined for "doesn't exist" and "exists but isn't yours" identically. */
+  async getIssueForOrganizations(issueId: string, organizationIds: string[]): Promise<{ issue: Issue | AggregatedIssue; scan: ScanResponse } | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const found = await this.getIssue(issueId);
+    if (!found || !found.scan.organizationId || !organizationIds.includes(found.scan.organizationId)) return undefined;
+    return found;
+  }
+
   async updateIssueStatus(issueId: string, status: IssueStatus): Promise<Issue | undefined> {
     const pool = getPool();
     if (!pool) return undefined;
@@ -481,6 +609,33 @@ export class ScanRepository {
     const result = await pool.query(
       `UPDATE issues SET status = $2 WHERE id = $1 RETURNING *`,
       [issueId, status],
+    );
+    if (result.rows.length === 0) return undefined;
+    return this.rowToIssue(result.rows[0]);
+  }
+
+  /** The authorization-aware mutation — verifies the issue's scan belongs to one of the caller's organizations before writing, using the same rule as getIssueForOrganizations. Returns undefined for "doesn't exist" and "exists but isn't yours" identically (no change is made either way). */
+  async updateIssueStatusForOrganizations(issueId: string, status: IssueStatus, organizationIds: string[]): Promise<Issue | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const owned = await pool.query(
+      `SELECT i.id FROM issues i JOIN scans s ON s.id = i.scan_id WHERE i.id = $1 AND s.organization_id = ANY($2::uuid[])`,
+      [issueId, organizationIds],
+    );
+    if (owned.rows.length === 0) return undefined;
+    return this.updateIssueStatus(issueId, status);
+  }
+
+  /** Persists which repository a finding's AI fix/PR should target (migration 019, see repository-finding-resolution-service.ts) — same shape as updateIssueStatus, just a different column. */
+  async updateIssueRepository(issueId: string, repositoryId: string): Promise<Issue | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const result = await pool.query(
+      `UPDATE issues SET repository_id = $2 WHERE id = $1 RETURNING *`,
+      [issueId, repositoryId],
     );
     if (result.rows.length === 0) return undefined;
     return this.rowToIssue(result.rows[0]);
@@ -567,6 +722,7 @@ export class ScanRepository {
       status: (row.status as IssueStatus) ?? 'open',
       groupKey: (row.group_key as string) ?? undefined,
       url: undefined,
+      repositoryId: (row.repository_id as string) ?? undefined,
     };
   }
 }

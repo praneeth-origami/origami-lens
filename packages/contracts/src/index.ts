@@ -71,6 +71,16 @@ export interface Issue {
   url?: string;
   status?: IssueStatus;
   createdAt?: string;
+  /**
+   * Which connected repository this finding's AI fix/PR should target
+   * (migration 019) — unset until the user picks one (see
+   * repository-finding-resolution-service.ts and IssueDetailPage.tsx's
+   * repository picker); once set, the fix-proposal route rejects any later
+   * attempt to target a different repository for this same finding
+   * (REPOSITORY_MISMATCH). A scan finding has no inherent repository of its
+   * own — this is always an explicit choice, never inferred/guessed.
+   */
+  repositoryId?: string;
 }
 
 export interface CategoryScore {
@@ -281,6 +291,8 @@ export interface ScanResponse {
   pages?: PageScanRecord[];
   failedPages?: FailedPageRecord[];
   discoveryMethod?: DiscoveryMethod;
+  /** The organization that ran this scan (migration 018) — the real ownership boundary; resolved server-side from the authenticated caller, never client-supplied. Undefined for scans that predate this migration, which are therefore unowned and inaccessible. */
+  organizationId?: string;
   ownerId?: string;
   error?: string;
 }
@@ -299,10 +311,76 @@ export interface ScanListItem {
   url: string;
   overallScore: number;
   totalIssues: number;
+  /** Severity breakdown of `totalIssues` — same counts already computed once and stored in `ScanSummary`, just also projected onto the list item so the scans list can show them without a per-scan detail call. */
+  critical?: number;
+  high?: number;
+  medium?: number;
+  low?: number;
   scannedAt: string;
   scanType?: ScanType;
   status?: ScanStatus;
 }
+
+/* ------------------------------------------------------------------------ */
+/* Lens Report — export/share (see apps/api/src/report-service.ts). A       */
+/* versioned, stable representation derived from an already-persisted      */
+/* ScanResponse — never recalculates the Health Score, never re-runs AI.    */
+/* Decoupled from the DB row shape on purpose so future versions can evolve */
+/* without breaking existing JSON/share consumers.                         */
+/* ------------------------------------------------------------------------ */
+
+export const REPORT_VERSION = '1.0' as const;
+
+export interface LensReportIssue {
+  id: string;
+  title: string;
+  severity: Severity;
+  category: IssueCategory;
+  status?: IssueStatus;
+  problem: string;
+  cause: string;
+  impact: string;
+  suggestedFix: string;
+  url?: string;
+  selector?: string;
+  occurrenceCount?: number;
+  affectedPages?: string[];
+}
+
+export interface LensReportSummary {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+}
+
+/** Never CSV first (PDF is the primary human-facing report) — see ReportExportMenu.tsx's ordering. */
+export type ReportExportFormat = 'pdf' | 'json' | 'markdown' | 'csv';
+
+export interface LensReport {
+  reportVersion: typeof REPORT_VERSION;
+  generatedAt: string;
+  scanId: string;
+  url: string;
+  /** The real scan state — never fabricated. A non-completed status means healthScore/categories are null (no partial/fake report). */
+  reportStatus: ScanStatus;
+  scannedAt?: string;
+  healthScore: number | null;
+  categories: Record<IssueCategory, number> | null;
+  summary: LensReportSummary;
+  issues: LensReportIssue[];
+}
+
+export interface ReportShareStatusResponse {
+  active: boolean;
+}
+
+export interface CreateReportShareResponse {
+  token: string;
+  url: string;
+}
+
+export type ReportErrorCode = 'REPORT_NOT_READY' | 'REPORT_SHARE_NOT_FOUND' | 'INVALID_EXPORT_FORMAT';
 
 export interface IssueFilters {
   severity?: Severity | 'all';
@@ -387,6 +465,17 @@ export const CATEGORY_WEIGHTS: Record<IssueCategory, number> = {
   bestPractices: 10,
   seo: 5,
   securityHygiene: 5,
+};
+
+/** Moved here from apps/web/src/api/client.ts (which re-exports it unchanged) so apps/api's report renderers (PDF/Markdown/CSV) use the exact same display labels as the web app, instead of a second hand-maintained copy. */
+export const CATEGORY_LABEL: Record<IssueCategory, string> = {
+  functional: 'Functional',
+  performance: 'Performance',
+  visualMobile: 'Visual / Mobile',
+  accessibility: 'Accessibility',
+  bestPractices: 'Best Practices',
+  seo: 'SEO',
+  securityHygiene: 'Security Hygiene',
 };
 
 export const SEVERITY_DEDUCTIONS: Record<Severity, number> = {
@@ -575,6 +664,8 @@ export interface ComponentVerification {
 export interface ComponentGenerationJob {
   jobId: string;
   ownerId?: string;
+  /** The organization that created this job (migration 018) — the real ownership boundary; resolved server-side from the authenticated caller, never client-supplied. Undefined for jobs that predate this migration, which are therefore unowned and inaccessible. */
+  organizationId?: string;
   sourceUrl: string;
   pageTitle?: string;
   target: CodeTarget;
@@ -648,21 +739,35 @@ export type RepositoryStatus =
   | 'EMBEDDING'
   | 'EMBEDDINGS_READY';
 
+/**
+ * Which layer of a project this repository represents (migration 019) —
+ * lets a project connect either one FULL_STACK repository (today's only
+ * shape, and the default for every existing/omitted-role repository) or two
+ * separate FRONTEND/BACKEND repositories. Purely a label used for display
+ * and for helping a human pick the right repository when a scan finding's
+ * repository is ambiguous (see repository-finding-resolution-service.ts) —
+ * never used to auto-guess a repository on its own.
+ */
+export type RepositoryRole = 'FRONTEND' | 'BACKEND' | 'FULL_STACK';
+
 export interface Repository {
   id: string;
   /**
    * Legacy, pre-Phase-16 client-supplied identifier — kept only for
    * historical rows, never read for any authorization decision (see
-   * migration 012). Real ownership is `userId` below.
-   * @deprecated Use `userId`.
+   * migration 012). Real ownership is `organizationId` below.
+   * @deprecated Use `organizationId`.
    */
   ownerId?: string;
-  /** The authenticated Origami Lens user who owns this repository (migration 012) — the only value any ownership check compares against. Undefined for legacy pre-Phase-16 rows, which are therefore unowned and inaccessible. */
+  /** The user who created this repository connection (migration 012) — an audit/"created by" field only. Not read for authorization since Phase 2 (migration 016); see `organizationId`. */
   userId?: string;
+  /** The organization that owns this repository (Phase 2, migration 016) — the only value any ownership/access check compares against. Every user has exactly one personal organization (auto-created at signup); a repository belongs to whichever organization created it, which is what makes Team/Agency sharing possible without ever changing this field's meaning. Undefined for legacy pre-Phase-2 rows, which are therefore unowned and inaccessible. */
+  organizationId?: string;
   repoUrl: string;
   provider: RepositoryProvider;
   branch: string;
   status: RepositoryStatus;
+  role: RepositoryRole;
   createdAt: string;
   updatedAt: string;
 }
@@ -671,6 +776,8 @@ export interface CreateRepositoryRequest {
   repoUrl: string;
   /** Optional — defaults to 'main' server-side if omitted. */
   branch?: string;
+  /** Optional — defaults to 'FULL_STACK' server-side if omitted (migration 019). */
+  role?: RepositoryRole;
   // No ownerId/userId field: ownership is always derived server-side from
   // the authenticated request.user.id (Phase 16/B) — a client can never
   // select who a repository belongs to.
@@ -1216,7 +1323,22 @@ export type RepositoryFixProposalErrorCode =
   /** The LLM was reachable and responded, but the response body was not valid/complete JSON (e.g. truncated mid-string by an output-token limit) — distinct from LLM_PROVIDER_UNAVAILABLE, which means the provider could not be reached at all. */
   | 'LLM_INVALID_RESPONSE'
   | 'PROPOSAL_INVALID'
-  | 'FIX_PROPOSAL_FAILED';
+  | 'FIX_PROPOSAL_FAILED'
+  /** This finding already has a different repository recorded against it (see Issue.repositoryId) — a fix was already generated once against that repository, and this request targets a different one. Never silently redirected. */
+  | 'REPOSITORY_MISMATCH';
+
+/**
+ * The result of `resolveRepositoryForIssue` (see
+ * repository-finding-resolution-service.ts) — 'resolved' when there is
+ * exactly one sensible repository (already chosen for this finding, or the
+ * only one connected); 'unresolved' when more than one repository could
+ * apply and nothing has been chosen yet (the caller must ask the user,
+ * never guess); 'none' when no repository is connected at all.
+ */
+export type RepositoryResolution =
+  | { status: 'resolved'; repository: Repository }
+  | { status: 'unresolved'; candidates: Repository[] }
+  | { status: 'none' };
 
 export interface RepositoryFixProposalResponse {
   repositoryId: string;
@@ -1442,14 +1564,60 @@ export type RepositoryFixWorkflowErrorCode =
 /* only thing ever sent to the frontend; no session id, no provider token.  */
 /* ------------------------------------------------------------------------ */
 
+/**
+ * The set of providers Origami Lens can authenticate a HUMAN with — a
+ * distinct concept from RepositoryProvider (which git host a REPOSITORY is
+ * hosted on). The two happened to be the same three values while GitHub was
+ * the only login provider, but GOOGLE is login-only: it can never host a
+ * repository, so it must never appear anywhere RepositoryProvider is used
+ * (provider_connections, repositories.provider, the git-provider-client
+ * switch statements, etc.) — only here, for `users.primary_provider`. Same
+ * reasoning applies to 'EMAIL' (migration 020): a password-authenticated
+ * account can never host a repository either.
+ */
+export type AuthProvider = RepositoryProvider | 'GOOGLE' | 'EMAIL';
+
+/**
+ * Phase 3 — who the user says they are, captured once during onboarding
+ * (migration 017). Purely descriptive: nothing in the app branches on this
+ * yet (that's Phase 4, persona-specific features) — it exists so that work
+ * has real data to build on instead of guessing.
+ */
+export type Persona = 'DEVELOPER' | 'FOUNDER' | 'AGENCY' | 'DESIGNER' | 'QA_TEAM' | 'PRODUCT_MANAGER';
+
+/**
+ * Phase 18 — platform-level authorization (migration 026), completely
+ * separate from Persona above despite the shared 'FOUNDER' string: Persona
+ * is a nullable, purely descriptive onboarding self-report that nothing
+ * branches on; PlatformRole is a real, non-nullable authorization boundary
+ * (see authorization/platform-permissions.ts). Never confuse
+ * user.persona === 'FOUNDER' with user.platformRole === 'FOUNDER' — they
+ * are unrelated columns/enums that happen to share a word.
+ */
+export type PlatformRole = 'FOUNDER' | 'ADMIN' | 'USER';
+
 export interface AuthUser {
   id: string;
-  primaryProvider: RepositoryProvider;
-  /** Display-only (e.g. GitHub login) — never used as an authorization key. */
+  primaryProvider: AuthProvider;
+  /** Display-only (e.g. GitHub login, or Google display name) — never used as an authorization key. */
   primaryProviderLogin: string;
   email?: string;
   displayName?: string;
   avatarUrl?: string;
+  /** Undefined until the user completes the Phase 3 onboarding question — the frontend uses this to show the onboarding prompt exactly once. */
+  persona?: Persona;
+  /** Defaults to 'USER' for every account — see PlatformRole's doc comment for why this is a different concept from `persona` above. */
+  platformRole: PlatformRole;
+  /** Phase 18 — GET /admin/users' "created date" column. Not previously exposed on AuthUser; added for the admin user list rather than fabricated there. */
+  createdAt: string;
+  /** Phase 20 — which workspace is "active" once a user belongs to more than one (e.g. after accepting a workspace invitation). Undefined for every user who has only ever belonged to their personal organization. */
+  activeOrganizationId?: string;
+  /** Set once the user confirms an email-verification link (password accounts only — OAuth accounts never set this, since the provider already verified the email). Undefined means "not verified" or "not applicable"; nothing in the app currently gates on this — see VerifyEmailRequest's doc comment. */
+  emailVerifiedAt?: string;
+}
+
+export interface SetPersonaRequest {
+  persona: Persona;
 }
 
 export interface AuthMeResponse {
@@ -1460,7 +1628,335 @@ export type AuthErrorCode =
   | 'AUTH_NOT_CONFIGURED'
   | 'OAUTH_STATE_MISMATCH'
   | 'OAUTH_EXCHANGE_FAILED'
-  | 'UNAUTHENTICATED';
+  | 'UNAUTHENTICATED'
+  /** Deliberately the SAME code/message for "no account with this email" and "wrong password" — never reveals which one, to avoid leaking which emails have an Origami Lens account. */
+  | 'INVALID_CREDENTIALS'
+  | 'EMAIL_ALREADY_REGISTERED'
+  | 'WEAK_PASSWORD'
+  | 'RESET_TOKEN_INVALID'
+  /** The backend has no SMTP configured — forgot-password still returns a generic success response to the caller either way (see password-auth-service.ts), this code is only ever logged server-side, never sent to the client. */
+  | 'EMAIL_NOT_CONFIGURED'
+  | 'VERIFICATION_TOKEN_INVALID';
+
+/* ------------------------------------------------------------------------ */
+/* Phase 16/H — Email + password login (migration 020/021), a third        */
+/* application-identity provider alongside GitHub/Google above. Results in */
+/* the exact same AuthUser/session/cookie model — see auth-service.ts's    */
+/* loginWithGitHub/loginWithGoogle and password-auth-service.ts's mirror   */
+/* of that same shape.                                                     */
+/* ------------------------------------------------------------------------ */
+
+export interface RegisterRequest {
+  displayName: string;
+  email: string;
+  password: string;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface ForgotPasswordRequest {
+  email: string;
+}
+
+/** Always returns { ok: true } regardless of whether the email exists — see password-auth-service.ts's requestPasswordReset. */
+export interface ForgotPasswordResponse {
+  ok: true;
+}
+
+export interface ResetPasswordRequest {
+  token: string;
+  password: string;
+}
+
+/**
+ * Email verification — additive only (see password-auth-service.ts's
+ * registerWithEmail/confirmEmailVerification/resendVerificationEmail):
+ * sends a confirm link on password registration and lets it be confirmed
+ * or resent. Nothing in the app gates on `AuthUser.emailVerifiedAt` today —
+ * this is purely an available, self-serve confirmation, not an access
+ * control mechanism.
+ */
+export interface VerifyEmailRequest {
+  token: string;
+}
+
+/** Always returns { ok: true } regardless of whether the email exists or is already verified — same non-enumeration shape as ForgotPasswordResponse. */
+export interface ResendVerificationEmailResponse {
+  ok: true;
+}
+
+export interface ResendVerificationEmailRequest {
+  email: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Phase 2 — Organizations. Every user gets exactly one personal            */
+/* organization, auto-created at signup (migration 015) — the real         */
+/* ownership boundary for repositories (see Repository.organizationId) and */
+/* the foundation for Team/Agency sharing: a non-personal organization with */
+/* more than one MEMBER/OWNER is the same shape, just without a            */
+/* personalOwnerUserId. Nothing in this phase exposes multi-member         */
+/* organizations yet.                                                      */
+/* ------------------------------------------------------------------------ */
+
+/** Expanded in migration 027 (Phase 18) from just OWNER/MEMBER — see authorization/workspace-permissions.ts, the one place these are turned into actual permission decisions. */
+export type OrganizationRole = 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER' | 'CLIENT_VIEWER';
+
+export interface Organization {
+  id: string;
+  name: string;
+  /** Set only for a user's own personal organization (one per user, guaranteed unique). Undefined for a real team/agency organization. */
+  personalOwnerUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrganizationMembership {
+  id: string;
+  organizationId: string;
+  userId: string;
+  role: OrganizationRole;
+  createdAt: string;
+}
+
+/** OrganizationMembership joined with the member's own user record — the shape the workspace-members UI actually needs (an id/role pair alone isn't enough to render a member list). */
+export interface WorkspaceMember {
+  userId: string;
+  email?: string;
+  displayName?: string;
+  role: OrganizationRole;
+  joinedAt: string;
+}
+
+export interface ListWorkspaceMembersResponse {
+  members: WorkspaceMember[];
+}
+
+export interface AddWorkspaceMemberRequest {
+  email: string;
+  role: OrganizationRole;
+}
+
+export interface UpdateWorkspaceMemberRoleRequest {
+  role: OrganizationRole;
+}
+
+export interface TransferWorkspaceOwnershipRequest {
+  newOwnerUserId: string;
+}
+
+/** GET /workspace/role — the one lightweight lookup the frontend uses to hide/disable actions a user can't perform; the API remains authoritative regardless of what the UI does with this. */
+export interface WorkspaceRoleResponse {
+  organizationId: string;
+  role: OrganizationRole;
+}
+
+export type WorkspaceErrorCode =
+  | 'FORBIDDEN'
+  | 'MEMBER_NOT_FOUND'
+  | 'MEMBER_ALREADY_EXISTS'
+  | 'CANNOT_REMOVE_LAST_OWNER'
+  | 'MULTI_MEMBER_NOT_SUPPORTED_ON_PLAN';
+
+/* ------------------------------------------------------------------------ */
+/* Phase 20 — workspace email invitations (migration 030). Membership is    */
+/* created only on explicit acceptance; see workspace-invitation-service.ts.*/
+/* ------------------------------------------------------------------------ */
+
+export type WorkspaceInvitationStatus = 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
+
+export interface WorkspaceInvitation {
+  id: string;
+  organizationId: string;
+  invitedEmail: string;
+  invitedByUserId: string;
+  invitedByEmail?: string;
+  role: OrganizationRole;
+  status: WorkspaceInvitationStatus;
+  expiresAt: string;
+  acceptedAt?: string;
+  createdAt: string;
+}
+
+export interface CreateWorkspaceInvitationRequest {
+  email: string;
+  role: OrganizationRole;
+}
+
+export interface CreateWorkspaceInvitationResponse {
+  invitation: WorkspaceInvitation;
+  /** Whether the invitation email actually left the server — a delivery failure never blocks the invitation from being created (see spec §30); the UI surfaces this so an OWNER/ADMIN knows to use Resend. */
+  emailDelivered: boolean;
+}
+
+export interface ListWorkspaceInvitationsResponse {
+  invitations: WorkspaceInvitation[];
+}
+
+/** GET /invitations/:token — public, no auth required. Only what the link's possessor should already know; never the token itself. */
+export interface InvitationPreviewResponse {
+  status: WorkspaceInvitationStatus | 'NOT_FOUND';
+  organizationName?: string;
+  inviterEmail?: string;
+  invitedEmail?: string;
+  role?: OrganizationRole;
+  expiresAt?: string;
+}
+
+export interface AcceptInvitationResponse {
+  organizationId: string;
+  organizationName: string;
+  role: OrganizationRole;
+}
+
+export type WorkspaceInvitationErrorCode =
+  | 'FORBIDDEN'
+  | 'INVALID_ROLE'
+  | 'INVALID_EMAIL'
+  | 'MEMBER_ALREADY_EXISTS'
+  | 'MULTI_MEMBER_NOT_SUPPORTED_ON_PLAN'
+  | 'INVITATION_NOT_FOUND'
+  | 'INVITATION_EXPIRED'
+  | 'INVITATION_REVOKED'
+  | 'INVITATION_ALREADY_ACCEPTED'
+  | 'EMAIL_MISMATCH';
+
+/** GET /workspace/list-mine — every organization the caller belongs to, for the workspace switcher (only rendered when this has more than one entry). */
+export interface WorkspaceListItem {
+  organizationId: string;
+  name: string;
+  role: OrganizationRole;
+}
+
+export interface ListMyWorkspacesResponse {
+  workspaces: WorkspaceListItem[];
+}
+
+export interface SwitchWorkspaceRequest {
+  organizationId: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Phase 18 — platform administration (migration 026/028). FOUNDER/ADMIN    */
+/* only; see authorization/platform-permissions.ts.                        */
+/* ------------------------------------------------------------------------ */
+
+export interface AdminUserSummary {
+  id: string;
+  email?: string;
+  displayName?: string;
+  platformRole: PlatformRole;
+  createdAt: string;
+  workspaceCount: number;
+  /** The user's PERSONAL organization's plan (plans belong to organizations, not users — see PLAN_DEFINITIONS) — undefined only when searchUsersForAdmin's plan lookup wasn't run (e.g. listUsersForAdmin's plain listing). */
+  plan?: SubscriptionPlan;
+}
+
+export interface AdminListUsersResponse {
+  users: AdminUserSummary[];
+}
+
+export interface AdminWorkspaceSummary {
+  id: string;
+  name: string;
+  plan: SubscriptionPlan;
+  memberCount: number;
+  ownerEmail?: string;
+  createdAt: string;
+}
+
+export interface AdminListWorkspacesResponse {
+  workspaces: AdminWorkspaceSummary[];
+}
+
+export interface UpdatePlatformRoleRequest {
+  platformRole: PlatformRole;
+}
+
+export type AdminErrorCode = 'FORBIDDEN' | 'USER_NOT_FOUND' | 'CANNOT_DEMOTE_LAST_FOUNDER';
+
+/* ------------------------------------------------------------------------ */
+/* Phase 19 — the admin operational activity dashboard. Reuses every job    */
+/* table's own status enum (scans/component_jobs/repository_*_jobs/         */
+/* repository_fix_workflows) rather than inventing a parallel one — see     */
+/* apps/api/src/admin/activity-repository.ts, the single place these get    */
+/* turned into cross-organization aggregate/list queries.                  */
+/* ------------------------------------------------------------------------ */
+
+export type AdminActivityType = 'SCAN' | 'AI_JOB' | 'REPOSITORY_JOB' | 'FIX_WORKFLOW';
+
+export interface AdminActivityItem {
+  id: string;
+  type: AdminActivityType;
+  /** A short human label of what's happening, e.g. "Website scan", "Screenshot → Code", "Repository clone" — never raw evidence/prompts/diffs. */
+  label: string;
+  status: string;
+  organizationId?: string;
+  /** Hostname or repository/finding display name — never a full URL with query strings, never file contents or evidence. */
+  targetLabel?: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface ListAdminActivityResponse {
+  items: AdminActivityItem[];
+}
+
+export interface AdminActiveNowCounts {
+  activeUsers: number;
+  activeScans: number;
+  activeAiJobs: number;
+  activeRepositoryJobs: number;
+  activeFixWorkflows: number;
+}
+
+export interface AdminSubscriptionBreakdown {
+  byPlan: Record<SubscriptionPlan, number>;
+  byStatus: Record<SubscriptionStatus, number>;
+}
+
+export interface AdminUsageTodayByPlan {
+  plan: SubscriptionPlan;
+  inspections: number;
+  aiQuestions: number;
+  screenshotToCode: number;
+}
+
+export interface AdminOverviewSystemHealth {
+  postgres: 'ok' | 'down';
+  redis: 'ok' | 'down' | 'not_configured';
+  api: 'ok' | 'down';
+  browserWorker: 'ok' | 'down';
+  aiRouter: 'ok' | 'down';
+}
+
+export interface AdminOverviewResponse {
+  totalUsers: number;
+  newUsersToday: number;
+  newUsersThisWeek: number;
+  totalWorkspaces: number;
+  activeNow: AdminActiveNowCounts;
+  systemHealth: AdminOverviewSystemHealth;
+  subscriptions: AdminSubscriptionBreakdown;
+  usageToday: AdminUsageTodayByPlan[];
+  recentActivity: AdminActivityItem[];
+}
+
+export interface AdminUserWorkspaceMembership {
+  organizationId: string;
+  organizationName: string;
+  role: OrganizationRole;
+}
+
+export interface AdminUserDetail extends AdminUserSummary {
+  lastActiveAt?: string;
+  subscriptionPlan?: SubscriptionPlan;
+  workspaces: AdminUserWorkspaceMembership[];
+  usageToday: UsageSnapshot[];
+}
 
 /* ------------------------------------------------------------------------ */
 /* Phase 16/C — real, per-user Git provider authorization (migration 013).  */
@@ -1481,3 +1977,181 @@ export interface ProviderConnectionSummary {
 export interface ListProviderConnectionsResponse {
   connections: ProviderConnectionSummary[];
 }
+
+/* ------------------------------------------------------------------------ */
+/* Phase 17 — Stripe billing, subscriptions, entitlements & usage limits. A  */
+/* subscription belongs to an ORGANIZATION (see Organization above), not a  */
+/* user directly — for a personal organization that's equivalent to        */
+/* per-user billing; for a Team organization it naturally extends to many   */
+/* members sharing one plan (migrations 023-025). PLAN_DEFINITIONS is the   */
+/* single source of truth for plan pricing/limits/features, consumed by     */
+/* BOTH the API (entitlement enforcement, apps/api/src/billing/) and the    */
+/* web app (the pricing page) — never duplicate a limit or price anywhere   */
+/* else.                                                                    */
+/* ------------------------------------------------------------------------ */
+
+export type SubscriptionPlan = 'FREE' | 'DEVELOPER' | 'PRO' | 'TEAM' | 'AGENCY';
+
+export type BillingInterval = 'MONTHLY' | 'ANNUAL';
+
+export type SubscriptionStatus = 'ACTIVE' | 'PAST_DUE' | 'CANCELED' | 'INCOMPLETE' | 'TRIALING';
+
+/** One row per metered action per organization per UTC day (usage_counters, migration 025). */
+export type UsageMetric = 'INSPECTION' | 'AI_QUESTION' | 'SCREENSHOT_TO_CODE';
+
+export interface PlanLimits {
+  /** `null` means unlimited — see EntitlementService.checkAndConsumeQuota, which skips the usage-counter write entirely for a null limit. */
+  inspectionsPerDay: number | null;
+  aiQuestionsPerDay: number | null;
+  screenshotToCodePerDay: number | null;
+}
+
+export interface PlanDefinition {
+  id: SubscriptionPlan;
+  name: string;
+  tagline: string;
+  priceMonthlyUsd: number;
+  priceAnnualUsd: number;
+  limits: PlanLimits;
+  /** TEAM/AGENCY only — every other plan is fixed at 1 seat. */
+  includedSeats: number;
+  extraSeatPriceMonthlyUsd: number | null;
+  features: string[];
+  /** false for a plan that exists in the data model and pricing-page copy but cannot actually be purchased yet — POST /billing/checkout rejects an inactive plan with INVALID_PLAN. Only AGENCY is inactive today. */
+  active: boolean;
+}
+
+export const PLAN_DEFINITIONS: Record<SubscriptionPlan, PlanDefinition> = {
+  FREE: {
+    id: 'FREE',
+    name: 'Free',
+    tagline: 'Try Origami Lens on your own site',
+    priceMonthlyUsd: 0,
+    priceAnnualUsd: 0,
+    limits: { inspectionsPerDay: 5, aiQuestionsPerDay: 5, screenshotToCodePerDay: 2 },
+    includedSeats: 1,
+    extraSeatPriceMonthlyUsd: null,
+    features: ['5 inspections/day', '5 AI questions/day', '2 Screenshot→Code/day', 'Community support'],
+    active: true,
+  },
+  DEVELOPER: {
+    id: 'DEVELOPER',
+    name: 'Developer',
+    tagline: 'For individual developers shipping fast',
+    priceMonthlyUsd: 19,
+    priceAnnualUsd: 190,
+    limits: { inspectionsPerDay: 50, aiQuestionsPerDay: 50, screenshotToCodePerDay: 20 },
+    includedSeats: 1,
+    extraSeatPriceMonthlyUsd: null,
+    features: ['50 inspections/day', '50 AI questions/day', '20 Screenshot→Code/day', 'Email support'],
+    active: true,
+  },
+  PRO: {
+    id: 'PRO',
+    name: 'Pro',
+    tagline: 'For professionals who ship every day',
+    priceMonthlyUsd: 49,
+    priceAnnualUsd: 490,
+    limits: { inspectionsPerDay: 200, aiQuestionsPerDay: 200, screenshotToCodePerDay: 100 },
+    includedSeats: 1,
+    extraSeatPriceMonthlyUsd: null,
+    features: ['200 inspections/day', '200 AI questions/day', '100 Screenshot→Code/day', 'Priority support'],
+    active: true,
+  },
+  TEAM: {
+    id: 'TEAM',
+    name: 'Team',
+    tagline: 'For teams collaborating on quality',
+    priceMonthlyUsd: 99,
+    priceAnnualUsd: 990,
+    limits: { inspectionsPerDay: null, aiQuestionsPerDay: null, screenshotToCodePerDay: null },
+    includedSeats: 3,
+    extraSeatPriceMonthlyUsd: 4,
+    features: [
+      'Unlimited inspections',
+      'Unlimited AI questions',
+      'Unlimited Screenshot→Code',
+      '3 seats included, $4/extra seat/month',
+      'Priority support',
+    ],
+    active: true,
+  },
+  AGENCY: {
+    id: 'AGENCY',
+    name: 'Agency',
+    tagline: 'For agencies managing many client sites (coming soon)',
+    priceMonthlyUsd: 249,
+    priceAnnualUsd: 2490,
+    limits: { inspectionsPerDay: null, aiQuestionsPerDay: null, screenshotToCodePerDay: null },
+    includedSeats: 10,
+    extraSeatPriceMonthlyUsd: 4,
+    features: ['Everything in Team', 'Multi-client workspace management', 'White-label reports', 'Dedicated support'],
+    active: false,
+  },
+};
+
+/** India-specific pricing overlay — prepared, not yet surfaced anywhere (gated server-side by ENABLE_INDIA_PRICING; see .env.example). A plan absent here has no regional override. */
+export const INDIA_PRICE_OVERRIDES_INR: Partial<Record<SubscriptionPlan, { priceMonthlyInr: number; priceAnnualInr: number }>> = {
+  DEVELOPER: { priceMonthlyInr: 799, priceAnnualInr: 7990 },
+  PRO: { priceMonthlyInr: 1999, priceAnnualInr: 19990 },
+  TEAM: { priceMonthlyInr: 3999, priceAnnualInr: 39990 },
+};
+
+export interface Subscription {
+  organizationId: string;
+  plan: SubscriptionPlan;
+  status: SubscriptionStatus;
+  billingInterval: BillingInterval | null;
+  seatCount: number;
+  currentPeriodEnd?: string;
+  cancelAtPeriodEnd: boolean;
+}
+
+export interface UsageSnapshot {
+  metric: UsageMetric;
+  count: number;
+  limit: number | null;
+}
+
+/** The one place plan logic resolves into concrete numbers — routes/middleware consume this, never PLAN_DEFINITIONS or `plan` directly. See apps/api/src/billing/entitlement-service.ts. */
+export interface Entitlements {
+  plan: SubscriptionPlan;
+  limits: PlanLimits;
+  seatsIncluded: number;
+  seatsUsed: number;
+}
+
+export interface BillingStatusResponse {
+  subscription: Subscription;
+  entitlements: Entitlements;
+  usageToday: UsageSnapshot[];
+  /** false when STRIPE_SECRET_KEY is unset — the billing settings page uses this to explain why "Manage billing"/"Upgrade" are disabled rather than letting the click fail with a confusing error. */
+  billingConfigured: boolean;
+}
+
+export interface CreateCheckoutSessionRequest {
+  plan: SubscriptionPlan;
+  interval: BillingInterval;
+  /** TEAM only — total seats desired, including the included seats. Ignored for every other plan. */
+  seats?: number;
+}
+
+export interface CreateCheckoutSessionResponse {
+  url: string;
+}
+
+export interface CreateBillingPortalSessionResponse {
+  url: string;
+}
+
+export interface UpdateSeatsRequest {
+  seats: number;
+}
+
+export type BillingErrorCode =
+  | 'BILLING_NOT_CONFIGURED'
+  | 'USAGE_LIMIT_EXCEEDED'
+  | 'INVALID_PLAN'
+  | 'SEAT_COUNT_INVALID'
+  | 'CHECKOUT_SESSION_NOT_FOUND'
+  | 'ORGANIZATION_NOT_FOUND';

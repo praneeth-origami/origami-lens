@@ -1,51 +1,46 @@
 import { Link } from 'react-router-dom';
 import type { AggregatedIssue, Issue } from '@origami/contracts';
 import { CATEGORY_LABEL, SEVERITY_LABEL, STATUS_LABEL } from '../api/client';
-import { IssueEvidence } from './IssueEvidence';
 
 interface Props {
   issue: Issue | AggregatedIssue;
+  /** Display name for issue.repositoryId, if resolved (migration 019) — omitted/undefined for a finding with no repository chosen yet. Keyed by id since a card only ever needs its own issue's repository, never the full Repository object. */
+  repositoryName?: string;
 }
 
-export function IssueCard({ issue }: Props) {
+/**
+ * Collapsed by design — Problem/Cause/Impact/Suggested Fix/Evidence all
+ * still exist, just on the existing /issues/:id detail page ("View
+ * details" below), not duplicated inline on every card. The whole card is
+ * clickable via the "stretched link" pattern (a single real, visible link
+ * whose ::after covers the card) rather than nesting an interactive
+ * element inside another — one real link per card, full-card click target.
+ */
+export function IssueCard({ issue, repositoryName }: Props) {
   const severityClass = issue.severity.toLowerCase();
   const aggregated = 'occurrenceCount' in issue ? issue : null;
+  const affectedCount = aggregated?.occurrenceCount ?? (issue.evidence.count && issue.evidence.count > 1 ? issue.evidence.count : undefined);
 
   return (
     <article className={`issue-card ${severityClass}`}>
-      <header>
+      <div className="issue-card-top">
         <span className={`severity-badge ${severityClass}`}>{SEVERITY_LABEL[issue.severity]}</span>
-        <h3>{issue.title}</h3>
-      </header>
-
-      <dl className="issue-meta">
-        <div>
-          <dt>Category</dt>
-          <dd>{CATEGORY_LABEL[issue.category] ?? issue.category}</dd>
-        </div>
-        <div>
-          <dt>Status</dt>
-          <dd>{STATUS_LABEL[issue.status ?? 'open']}</dd>
-        </div>
-        {aggregated && (
-          <div>
-            <dt>Affected pages</dt>
-            <dd>{aggregated.occurrenceCount} occurrence(s) on {aggregated.affectedPages.length} page(s)</dd>
-          </div>
-        )}
-      </dl>
-
-      <div className="issue-body">
-        <p><strong>Problem:</strong> {issue.problem}</p>
-        <p><strong>Cause:</strong> {issue.cause}</p>
-        <p><strong>Impact:</strong> {issue.impact}</p>
-        <p><strong>Suggested Fix:</strong> {issue.suggestedFix}</p>
+        <h3 className="issue-card-title">{issue.title}</h3>
       </div>
 
-      <IssueEvidence issue={issue} compact />
+      <p className="issue-card-meta">
+        {CATEGORY_LABEL[issue.category] ?? issue.category} · {STATUS_LABEL[issue.status ?? 'open']}
+        {repositoryName && <> · Repository: {repositoryName}</>}
+      </p>
 
-      <Link to={`/issues/${issue.id}`} className="btn-view">
-        View Issue
+      <p className="issue-card-description">{issue.problem}</p>
+
+      {affectedCount !== undefined && (
+        <p className="issue-card-affected">Affected: {affectedCount} occurrence{affectedCount === 1 ? '' : 's'}</p>
+      )}
+
+      <Link to={`/issues/${issue.id}`} className="issue-card-action">
+        View details <span aria-hidden="true">→</span>
       </Link>
     </article>
   );
@@ -53,9 +48,11 @@ export function IssueCard({ issue }: Props) {
 
 interface ListProps {
   issues: (Issue | AggregatedIssue)[];
+  /** See IssueCard's repositoryName — omit entirely where repository context isn't relevant (unchanged from before migration 019). */
+  repositoryNamesById?: Record<string, string>;
 }
 
-export function IssueList({ issues }: ListProps) {
+export function IssueList({ issues, repositoryNamesById }: ListProps) {
   if (issues.length === 0) {
     return (
       <div className="empty-state inline">
@@ -67,7 +64,7 @@ export function IssueList({ issues }: ListProps) {
   return (
     <div className="issue-list">
       {issues.map((issue) => (
-        <IssueCard key={issue.id} issue={issue} />
+        <IssueCard key={issue.id} issue={issue} repositoryName={issue.repositoryId ? repositoryNamesById?.[issue.repositoryId] : undefined} />
       ))}
     </div>
   );

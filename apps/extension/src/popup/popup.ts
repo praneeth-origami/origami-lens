@@ -350,9 +350,29 @@ function startPopupPolling() {
   popupPollTimer = setInterval(poll, 2000);
 }
 
+/** CURRENT_PAGE scans are matched by exact URL (that's the granularity they were run at); WEBSITE scans are matched by origin, since the crawl covers many pages under that one root. */
+function scanMatchesTab(activeScan: PersistedActiveScan, tabUrl: string | undefined): boolean {
+  if (!tabUrl) return false;
+  if (activeScan.scanType === 'WEBSITE') {
+    return getOriginFromUrl(activeScan.targetUrl) === getOriginFromUrl(tabUrl);
+  }
+  return activeScan.targetUrl === tabUrl;
+}
+
 async function restoreScanStateOnOpen() {
   const activeScan = await refreshScanStateFromBackground();
   if (!activeScan) return;
+
+  // An in-progress scan is background work worth resuming regardless of
+  // which tab is now active (a website crawl keeps running after you
+  // switch tabs) — but a scan that already finished should only take over
+  // the popup's main view when it's for the site you're currently on.
+  // Without this check, opening the popup on a brand-new site kept showing
+  // whatever report was scanned last, no matter what site that actually was.
+  if (isTerminalStatus(activeScan.status)) {
+    const tab = await getActiveTab();
+    if (!scanMatchesTab(activeScan, tab?.url)) return;
+  }
 
   const handled = await applyActiveScanToUI(activeScan);
   if (handled && isInProgressStatus(activeScan.status)) {
@@ -793,6 +813,23 @@ async function scanAgain() {
   goHome();
 }
 
+/**
+ * "Try again" / "Back" on the error view. goHome() alone only switches which
+ * view is showing — it never touches the persisted activeScan record, so a
+ * FAILED/CANCELLED scan stayed in chrome.storage.local forever, and the very
+ * next time the popup opened, restoreScanStateOnOpen() -> applyActiveScanToUI()
+ * read that same record and called setError() again, re-showing this exact
+ * screen. Reloading the extension in chrome://extensions never helped either,
+ * since that only reloads the code — it doesn't clear storage. Dismissing the
+ * error must clear the record itself (same as scanAgain() already does from
+ * the results view), or the error is permanently sticky across every future
+ * popup open until a brand-new scan happens to overwrite it.
+ */
+async function dismissError() {
+  await sendRuntimeMessage({ type: 'CLEAR_ACTIVE_SCAN' });
+  goHome();
+}
+
 let componentPollTimer: ReturnType<typeof setInterval> | null = null;
 
 function dashboardOrigin(): string {
@@ -912,8 +949,8 @@ async function init() {
   document.getElementById('website-form')!.addEventListener('submit', startWebsiteScan);
   document.getElementById('website-back-btn')!.addEventListener('click', goHome);
   document.getElementById('discovery-method')!.addEventListener('change', toggleManualUrlsField);
-  document.getElementById('retry-btn')!.addEventListener('click', goHome);
-  document.getElementById('error-back-btn')!.addEventListener('click', goHome);
+  document.getElementById('retry-btn')!.addEventListener('click', () => void dismissError());
+  document.getElementById('error-back-btn')!.addEventListener('click', () => void dismissError());
   document.getElementById('scan-again-btn')!.addEventListener('click', scanAgain);
   document.getElementById('issue-back-btn')!.addEventListener('click', () => showView('results'));
   document.getElementById('ask-btn')!.addEventListener('click', askAi);

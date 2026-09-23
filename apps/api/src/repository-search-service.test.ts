@@ -168,7 +168,7 @@ describe('searchRepository', () => {
     const embedding = new FakeEmbeddingProvider();
     const reranker = new FakeRerankerProvider(); // reverses order: last input scores highest
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'test query' },
       { embeddingProvider: embedding, rerankerProvider: reranker },
@@ -184,7 +184,7 @@ describe('searchRepository', () => {
     const embedding = new FakeEmbeddingProvider();
     embedding.failWith = new EmbeddingProviderError('unreachable', 'EMBEDDING_PROVIDER_UNAVAILABLE');
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }),
       (e: unknown) => e instanceof SearchError && e.code === 'EMBEDDING_PROVIDER_UNAVAILABLE',
     );
   });
@@ -194,7 +194,7 @@ describe('searchRepository', () => {
     const embedding = new FakeEmbeddingProvider();
     embedding.failWith = new EmbeddingProviderError('timed out', 'EMBEDDING_TIMEOUT');
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }),
       (e: unknown) => e instanceof SearchError && e.code === 'EMBEDDING_TIMEOUT',
     );
   });
@@ -205,7 +205,7 @@ describe('searchRepository', () => {
     embedding.dimensions = DIMENSIONS + 1;
     embedding.vector = [0.1, 0.2, 0.3, 0.4, 0.5];
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }),
       (e: unknown) => e instanceof SearchError && e.code === 'VECTOR_SEARCH_FAILED',
     );
   });
@@ -217,7 +217,7 @@ describe('searchRepository', () => {
     const controller = new AbortController();
     controller.abort();
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }, controller.signal),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: embedding, rerankerProvider: new FakeRerankerProvider() }, controller.signal),
       (e: unknown) => e instanceof SearchError,
     );
   });
@@ -241,7 +241,7 @@ describe('searchRepository', () => {
   it('a repository that was never indexed surfaces REPOSITORY_NOT_READY', async () => {
     const stores = fakeStores();
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'CONNECTED' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() }),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'CONNECTED' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() }),
       (e: unknown) => e instanceof SearchError && e.code === 'REPOSITORY_NOT_READY',
     );
   });
@@ -249,7 +249,7 @@ describe('searchRepository', () => {
   it('an indexed repository with no completed embedding job surfaces EMBEDDINGS_NOT_READY', async () => {
     const stores = fakeStores({ embeddingJob: null });
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'READY_FOR_SEARCH' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() }),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() }),
       (e: unknown) => e instanceof SearchError && e.code === 'EMBEDDINGS_NOT_READY',
     );
   });
@@ -261,7 +261,7 @@ describe('searchRepository', () => {
     };
     const stores = fakeStores({ embeddingJob: runningJob });
     await assert.rejects(
-      () => searchRepository({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDING' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() }),
+      () => searchRepository({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDING' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' }, { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() }),
       (e: unknown) => e instanceof SearchError && e.code === 'EMBEDDINGS_NOT_READY',
     );
   });
@@ -269,7 +269,7 @@ describe('searchRepository', () => {
   it('empty candidates returns a clean success response with results: [] and reranked: false', async () => {
     const stores = fakeStores({ candidates: [] });
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() },
     );
     assert.deepEqual(response.results, []);
@@ -280,7 +280,7 @@ describe('searchRepository', () => {
   it('TEST 31 — no vector arrays appear anywhere in the response', async () => {
     const stores = fakeStores();
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() },
     );
     const serialized = JSON.stringify(response);
@@ -298,7 +298,7 @@ describe('searchRepository', () => {
     ];
     const stores = fakeStores({ candidates });
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() },
     );
     assert.ok(!response.results.some((r) => r.filePath === '.env'));
@@ -311,7 +311,7 @@ describe('searchRepository', () => {
     const reranker = new FakeRerankerProvider();
     reranker.failWith = new RerankerProviderError('unavailable', 'RERANKER_UNAVAILABLE');
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: reranker },
     );
     assert.equal(response.reranked, false);
@@ -324,7 +324,7 @@ describe('searchRepository', () => {
     const reranker = new FakeRerankerProvider();
     reranker.failWith = new RerankerProviderError('timed out', 'RERANKER_TIMEOUT');
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: reranker },
     );
     assert.equal(response.reranked, false);
@@ -335,7 +335,7 @@ describe('searchRepository', () => {
     const stores = fakeStores({ candidates });
     const reranker = new FakeRerankerProvider();
     await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: reranker },
     );
     assert.ok(reranker.calls === 1);
@@ -345,7 +345,7 @@ describe('searchRepository', () => {
     const candidates = [makeCandidate({ symbol: 'a' }), makeCandidate({ symbol: 'b' }), makeCandidate({ symbol: 'c' })];
     const stores = fakeStores({ candidates });
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q', limit: 1 },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q', limit: 1 },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() },
     );
     assert.equal(response.results.length, 1);
@@ -355,7 +355,7 @@ describe('searchRepository', () => {
     const candidates = [makeCandidate({ content: 'x'.repeat(5000) })];
     const stores = fakeStores({ candidates });
     const response = await searchRepository(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', query: 'q' },
       { embeddingProvider: new FakeEmbeddingProvider(), rerankerProvider: new FakeRerankerProvider() },
     );
     assert.ok((response.results[0].content?.length ?? 0) < 5000);

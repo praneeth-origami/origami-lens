@@ -55,12 +55,72 @@ function isTerminal(status: RepositoryIndexStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
 }
 
-/** Injectable purely for deterministic testing (e.g. a smaller/faster processFile) — production always uses the real defaults. Mirrors repository-clone-worker.ts's ProcessJobDeps. */
+/**
+ * Injectable purely for deterministic testing (e.g. a smaller/faster
+ * processFile) — production always uses the real defaults for
+ * iterateFiles/processFile. Mirrors repository-clone-worker.ts's
+ * ProcessJobDeps. The notification fields are ALL optional — when omitted
+ * (as every existing test omits them), finalize() behaves exactly as
+ * before; a real caller (startRepositoryIndexWorker in index.ts) always
+ * provides them. A delivery failure never affects the job's own outcome.
+ */
 export interface IndexProcessJobDeps {
   iterateFiles: typeof iterateRepositoryFiles;
   processFile: typeof processRepositoryFile;
+  getUserById?(id: string): Promise<{ email?: string } | undefined>;
+  sendRepositoryIndexCompletedEmail?(to: string, data: { repoName: string; repositoryId: string; webAppBaseUrl: string; filesIndexed?: number; chunksCreated?: number }): Promise<void>;
+  sendRepositoryIndexFailedEmail?(to: string, data: { repoName: string; repositoryId: string; webAppBaseUrl: string; errorMessage?: string }): Promise<void>;
+  webAppBaseUrl?: string;
 }
 const defaultDeps: IndexProcessJobDeps = { iterateFiles: iterateRepositoryFiles, processFile: processRepositoryFile };
+
+function repoNameFromUrl(repoUrl: string): string {
+  try {
+    return new URL(repoUrl).pathname.replace(/^\//, '');
+  } catch {
+    return repoUrl;
+  }
+}
+
+async function notifyIndexOutcomeBestEffort(
+  finalStatus: RepositoryIndexStatus,
+  finalError: string | undefined,
+  payload: RepositoryIndexJobPayload,
+  repositoryStore: UnifiedRepositoryStore,
+  deps: IndexProcessJobDeps,
+  counts: { filesIndexed: number; chunksCreated: number },
+): Promise<void> {
+  // Cancellation is a deliberate user action, not news worth emailing about.
+  if (finalStatus !== 'COMPLETED' && finalStatus !== 'FAILED') return;
+  if (!deps.getUserById || !deps.webAppBaseUrl) return;
+
+  try {
+    const repository = await repositoryStore.getByIdAsync(payload.repositoryId);
+    if (!repository?.userId) return;
+    const owner = await deps.getUserById(repository.userId);
+    if (!owner?.email) return;
+
+    const repoName = repoNameFromUrl(repository.repoUrl);
+    if (finalStatus === 'COMPLETED' && deps.sendRepositoryIndexCompletedEmail) {
+      await deps.sendRepositoryIndexCompletedEmail(owner.email, {
+        repoName,
+        repositoryId: repository.id,
+        webAppBaseUrl: deps.webAppBaseUrl,
+        filesIndexed: counts.filesIndexed,
+        chunksCreated: counts.chunksCreated,
+      });
+    } else if (finalStatus === 'FAILED' && deps.sendRepositoryIndexFailedEmail) {
+      await deps.sendRepositoryIndexFailedEmail(owner.email, {
+        repoName,
+        repositoryId: repository.id,
+        webAppBaseUrl: deps.webAppBaseUrl,
+        errorMessage: finalError,
+      });
+    }
+  } catch (error) {
+    console.error('[repository-index-worker] Failed to send an index-outcome notification email:', error instanceof Error ? error.message : error);
+  }
+}
 
 async function runBoundedConcurrent<T, R>(items: T[], concurrency: number, task: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -160,6 +220,8 @@ export async function processJob(
       filesSkipped,
       chunksCreated,
     });
+
+    await notifyIndexOutcomeBestEffort(finalStatus, finalError, payload, repositoryStore, deps, { filesIndexed, chunksCreated });
   };
 
   try {
@@ -267,6 +329,7 @@ export function startRepositoryIndexWorker(
   indexStore: UnifiedRepositoryIndexStore,
   repositoryStore: UnifiedRepositoryStore,
   cloneStore: UnifiedRepositoryCloneStore,
+  deps: Partial<IndexProcessJobDeps> = {},
 ): Worker<RepositoryIndexJobPayload> | null {
   const connection = getRedisConnection();
   if (!connection) return null;
@@ -274,7 +337,7 @@ export function startRepositoryIndexWorker(
   const worker = new Worker<RepositoryIndexJobPayload>(
     QUEUE_NAME,
     async (job: Job<RepositoryIndexJobPayload>) => {
-      await processJob(indexStore, repositoryStore, cloneStore, job.data);
+      await processJob(indexStore, repositoryStore, cloneStore, job.data, { ...defaultDeps, ...deps });
     },
     { connection, concurrency: 1, maxStalledCount: 1 },
   );

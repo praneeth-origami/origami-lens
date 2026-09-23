@@ -9,6 +9,7 @@ import type {
   EmbedRepositoryResponse,
   Issue,
   IssueFilters,
+  IssueSource,
   IssueStatus,
   PageScanRecord,
   Repository,
@@ -22,15 +23,66 @@ import type {
   RepositoryIndexStatus,
   RepositoryIssue,
   RepositoryIssueAnalysis,
+  RepositoryResolution,
+  RepositoryRole,
   RepositorySearchResponse,
   ScanListItem,
   ScanResponse,
   ScanStatusResponse,
   Severity,
   StartRepositoryIndexResponse,
+  ReportExportFormat,
+  CreateReportShareResponse,
+  ReportShareStatusResponse,
+  LensReport,
 } from '@origami/contracts';
 import { CODE_TARGET_META } from '@origami/contracts';
-import type { AuthMeResponse, ListProviderConnectionsResponse } from '@origami/contracts';
+import type {
+  AuthMeResponse,
+  AuthUser,
+  ForgotPasswordRequest,
+  ForgotPasswordResponse,
+  ListProviderConnectionsResponse,
+  LoginRequest,
+  Persona,
+  RegisterRequest,
+  ResetPasswordRequest,
+  VerifyEmailRequest,
+  ResendVerificationEmailRequest,
+  ResendVerificationEmailResponse,
+} from '@origami/contracts';
+import type {
+  BillingStatusResponse,
+  CreateBillingPortalSessionResponse,
+  CreateCheckoutSessionRequest,
+  CreateCheckoutSessionResponse,
+  Subscription,
+} from '@origami/contracts';
+import type {
+  AddWorkspaceMemberRequest,
+  AdminActivityType,
+  AdminListUsersResponse,
+  AdminListWorkspacesResponse,
+  AdminOverviewResponse,
+  AdminUserDetail,
+  ListAdminActivityResponse,
+  ListWorkspaceMembersResponse,
+  OrganizationRole,
+  PlatformRole,
+  SubscriptionPlan,
+  TransferWorkspaceOwnershipRequest,
+  UpdateWorkspaceMemberRoleRequest,
+  WorkspaceRoleResponse,
+  CreateWorkspaceInvitationRequest,
+  CreateWorkspaceInvitationResponse,
+  ListWorkspaceInvitationsResponse,
+  InvitationPreviewResponse,
+  AcceptInvitationResponse,
+  ListMyWorkspacesResponse,
+  SwitchWorkspaceRequest,
+} from '@origami/contracts';
+
+import { notifyApiError, notifyNetworkError } from '../notifications/error-messages';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? '/api';
 // Auth routes are mounted at /auth/* directly (not nested under /api), so
@@ -46,14 +98,37 @@ export class ApiRequestError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-    ...init,
-  });
+/** `silent: true` opts a call out of the automatic error toast below — only for the handful of pages that already render a well-crafted contextual inline message for that specific call, to avoid the double-notification spec §5 warns against. A 401 always redirects to /login regardless of `silent` (an expired session isn't something any single page can meaningfully recover from on its own). */
+export interface ApiRequestInit extends RequestInit {
+  silent?: boolean;
+}
+
+function redirectToLoginOn401(): void {
+  if (window.location.pathname === '/login') return;
+  window.location.href = '/login';
+}
+
+async function request<T>(path: string, init?: ApiRequestInit): Promise<T> {
+  const { silent, ...fetchInit } = init ?? {};
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...fetchInit.headers },
+      ...fetchInit,
+    });
+  } catch {
+    notifyNetworkError();
+    throw new ApiRequestError('Unable to reach the server. Check your connection and try again.', 'NETWORK_ERROR');
+  }
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { error?: string; errorCode?: string };
+    if (res.status === 401 || err.errorCode === 'UNAUTHENTICATED') {
+      notifyApiError({ status: res.status, code: err.errorCode, serverMessage: err.error });
+      redirectToLoginOn401();
+    } else if (!silent) {
+      notifyApiError({ status: res.status, code: err.errorCode, serverMessage: err.error });
+    }
     throw new ApiRequestError(err.error ?? `Request failed (${res.status})`, err.errorCode);
   }
   return res.json() as Promise<T>;
@@ -78,8 +153,56 @@ export function fetchScan(scanId: string) {
   return request<ScanResponse & { issuesByCategory: Record<string, number> }>(`/scans/${scanId}`);
 }
 
+export function deleteScan(scanId: string) {
+  return request<{ ok: true }>(`/scans/${scanId}`, { method: 'DELETE', body: JSON.stringify({}) });
+}
+
 export function fetchScanStatus(scanId: string) {
   return request<ScanStatusResponse>(`/scans/${scanId}/status`);
+}
+
+/**
+ * PDF/JSON/Markdown/CSV are all downloaded the same way — a real fetch (not
+ * the generic `request()` helper above, which always calls `.json()`) so
+ * the response's exact bytes and server-computed filename (Content-
+ * Disposition) are used untouched, matching the same Blob+anchor pattern
+ * this app already used for the old client-only JSON export.
+ */
+export async function downloadReportExport(scanId: string, format: ReportExportFormat): Promise<void> {
+  const res = await fetch(`${API_BASE}/scans/${scanId}/report/export/${format}`, { credentials: 'include' });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string; errorCode?: string };
+    notifyApiError({ status: res.status, code: err.errorCode, serverMessage: err.error });
+    throw new ApiRequestError(err.error ?? `Export failed (${res.status})`, err.errorCode);
+  }
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const filenameMatch = /filename="([^"]+)"/.exec(disposition);
+  const filename = filenameMatch?.[1] ?? `origami-lens-report.${format === 'markdown' ? 'md' : format}`;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export function getReportShareStatus(scanId: string) {
+  return request<ReportShareStatusResponse>(`/scans/${scanId}/report/share`);
+}
+
+/** Always rotates — see report-share-service.ts's doc comment for why a previously issued link can never be re-displayed (only its hash is stored). */
+export function createOrRotateReportShare(scanId: string) {
+  return request<CreateReportShareResponse>(`/scans/${scanId}/report/share`, { method: 'POST', body: JSON.stringify({}) });
+}
+
+export function revokeReportShare(scanId: string) {
+  return request<{ ok: true }>(`/scans/${scanId}/report/share`, { method: 'DELETE', body: JSON.stringify({}) });
+}
+
+/** Public — no session cookie required (see GET /reports/share/:token). Uses the same `request()` helper anyway since it's still same-origin JSON; a 404 here is expected/normal for a disabled or unknown link, not a bug. */
+export function fetchSharedReport(token: string) {
+  return request<LensReport>(`/reports/share/${token}`, { silent: true });
 }
 
 export function fetchScanPages(scanId: string) {
@@ -118,6 +241,11 @@ export function fetchIssue(issueId: string) {
   }>(`/issues/${issueId}`);
 }
 
+/** GET /issues/:issueId/repository-resolution — whether the finding's repository can be determined automatically (already chosen, or the only one connected) or needs the manual picker (see IssueDetailPage.tsx). Never guesses between multiple candidates — see repository-finding-resolution-service.ts. */
+export function fetchRepositoryResolution(issueId: string) {
+  return request<RepositoryResolution>(`/issues/${issueId}/repository-resolution`);
+}
+
 export function updateIssueStatus(issueId: string, status: IssueStatus) {
   return request<{ issue: Issue }>(`/issues/${issueId}/status`, {
     method: 'PATCH',
@@ -147,6 +275,10 @@ export function fetchComponentJob(jobId: string) {
   return request<ComponentGenerationJob>(`/components/${jobId}`);
 }
 
+export function deleteComponentJob(jobId: string) {
+  return request<{ ok: true }>(`/components/${jobId}`, { method: 'DELETE', body: JSON.stringify({}) });
+}
+
 export function retryComponentJob(jobId: string, target?: CodeTarget) {
   return request<{ jobId: string; status: string }>(`/components/${jobId}/retry`, {
     method: 'POST',
@@ -167,6 +299,10 @@ export function fetchRepositories() {
 
 export function fetchRepository(id: string) {
   return request<Repository>(`/repositories/${id}`);
+}
+
+export function deleteRepository(id: string) {
+  return request<{ ok: true }>(`/repositories/${id}`, { method: 'DELETE', body: JSON.stringify({}) });
 }
 
 export function createRepository(input: CreateRepositoryRequest) {
@@ -384,6 +520,203 @@ export function rejectRepositoryFixProposal(repositoryId: string, issueId: strin
   });
 }
 
+/* -------------------------------------------------------------------- */
+/* Phase 17 — Stripe billing/subscriptions/entitlements/usage limits.    */
+/* Same request<T>('/billing/...') pattern as every other non-auth call  */
+/* above (NOT authRequest/AUTH_BASE, which is /auth/* and /providers/*   */
+/* only) — see apps/api/src/index.ts's /billing/* routes.                */
+/* -------------------------------------------------------------------- */
+
+export function fetchBillingStatus() {
+  return request<BillingStatusResponse>('/billing/status');
+}
+
+export function createCheckoutSession(input: CreateCheckoutSessionRequest) {
+  return request<CreateCheckoutSessionResponse>('/billing/checkout', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function createBillingPortalSession() {
+  return request<CreateBillingPortalSessionResponse>('/billing/portal', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+/** Backs the success page's polling loop — never grants access itself, see billing-service.ts's getCheckoutSessionStatus. */
+export function fetchCheckoutSession(sessionId: string) {
+  return request<{ status: string | null; subscription: Subscription }>(`/billing/session/${encodeURIComponent(sessionId)}`);
+}
+
+export function updateSeats(seats: number) {
+  return request<{ ok: true }>('/billing/seats', {
+    method: 'PATCH',
+    body: JSON.stringify({ seats }),
+  });
+}
+
+/* -------------------------------------------------------------------- */
+/* Phase 18 — RBAC: workspace membership/role management + platform      */
+/* administration. Same request<T>('/...') pattern as every other        */
+/* non-auth call above — see apps/api/src/index.ts's /workspace/* and     */
+/* /admin/* routes. The API remains authoritative regardless of what the  */
+/* UI does with any of this (see useWorkspaceRole.ts).                   */
+/* -------------------------------------------------------------------- */
+
+export function fetchWorkspaceMembers() {
+  return request<ListWorkspaceMembersResponse>('/workspace/members');
+}
+
+export function addWorkspaceMember(input: AddWorkspaceMemberRequest) {
+  return request<{ userId: string; email?: string; displayName?: string; role: OrganizationRole; joinedAt: string }>('/workspace/members', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorkspaceMemberRole(userId: string, input: UpdateWorkspaceMemberRoleRequest) {
+  return request<{ ok: true }>(`/workspace/members/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+}
+
+export function removeWorkspaceMember(userId: string) {
+  return request<{ ok: true }>(`/workspace/members/${encodeURIComponent(userId)}`, { method: 'DELETE', body: JSON.stringify({}) });
+}
+
+export function transferWorkspaceOwnership(input: TransferWorkspaceOwnershipRequest) {
+  return request<{ ok: true }>('/workspace/transfer-ownership', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchWorkspaceRole() {
+  return request<WorkspaceRoleResponse>('/workspace/role');
+}
+
+/* -------------------------------------------------------------------- */
+/* Phase 20 — workspace email invitations + the workspace switcher.      */
+/* Membership is created only on explicit acceptance — see               */
+/* apps/api/src/workspace-invitation-service.ts.                         */
+/* -------------------------------------------------------------------- */
+
+export function createWorkspaceInvitation(input: CreateWorkspaceInvitationRequest) {
+  return request<CreateWorkspaceInvitationResponse>('/workspace/invitations', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchWorkspaceInvitations() {
+  return request<ListWorkspaceInvitationsResponse>('/workspace/invitations');
+}
+
+export function revokeWorkspaceInvitation(id: string) {
+  return request<{ ok: true }>(`/workspace/invitations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({}) });
+}
+
+export function resendWorkspaceInvitation(id: string) {
+  return request<CreateWorkspaceInvitationResponse>(`/workspace/invitations/${encodeURIComponent(id)}/resend`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+/** Public — no auth required, so a fresh visitor can see what they were invited to before signing in. */
+export function fetchInvitationPreview(token: string) {
+  return request<InvitationPreviewResponse>(`/invitations/${encodeURIComponent(token)}`);
+}
+
+export function acceptInvitation(token: string) {
+  return request<AcceptInvitationResponse>(`/invitations/${encodeURIComponent(token)}/accept`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+/** The workspace switcher's data source — every organization the caller belongs to. Only rendered when this has more than one entry. */
+export function fetchMyWorkspaces() {
+  return request<ListMyWorkspacesResponse>('/workspace/list-mine');
+}
+
+export function switchWorkspace(input: SwitchWorkspaceRequest) {
+  return request<{ ok: true }>('/workspace/switch', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export interface AdminUserSearchFilters {
+  search?: string;
+  role?: PlatformRole;
+  plan?: SubscriptionPlan;
+}
+
+export function fetchAdminUsers(filters: AdminUserSearchFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.search) params.set('search', filters.search);
+  if (filters.role) params.set('role', filters.role);
+  if (filters.plan) params.set('plan', filters.plan);
+  const qs = params.toString();
+  return request<AdminListUsersResponse>(`/admin/users${qs ? `?${qs}` : ''}`);
+}
+
+export function fetchAdminUserDetail(userId: string) {
+  return request<AdminUserDetail>(`/admin/users/${encodeURIComponent(userId)}`);
+}
+
+export function fetchAdminWorkspaces() {
+  return request<AdminListWorkspacesResponse>('/admin/workspaces');
+}
+
+export function fetchAdminOverview() {
+  return request<AdminOverviewResponse>('/admin/overview');
+}
+
+export interface AdminActivityFilters {
+  type?: AdminActivityType;
+  status?: string;
+  limit?: number;
+}
+
+export function fetchAdminActivity(filters: AdminActivityFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.type) params.set('type', filters.type);
+  if (filters.status) params.set('status', filters.status);
+  if (filters.limit) params.set('limit', String(filters.limit));
+  const qs = params.toString();
+  return request<ListAdminActivityResponse>(`/admin/activity${qs ? `?${qs}` : ''}`);
+}
+
+export function fetchAdminRecentActivity(limit = 20) {
+  return request<ListAdminActivityResponse>(`/admin/activity/recent?limit=${limit}`);
+}
+
+export interface AdminSystemHealth {
+  api: { status: 'ok' | 'down'; service: string; error?: string };
+  browserWorker: { status: 'ok' | 'down'; service: string; error?: string };
+  aiRouter: { status: 'ok' | 'down'; service: string; error?: string };
+  readyForScan: boolean;
+  postgres: { status: 'ok' | 'down'; error?: string };
+  redis: { configured: boolean; status: 'ok' | 'down' | 'not_configured'; error?: string };
+  queues: { name: string; active: number; waiting: number; delayed: number; failed: number }[];
+}
+
+export function fetchAdminSystemHealth() {
+  return request<AdminSystemHealth>('/admin/system-health');
+}
+
+export function updateUserPlatformRole(userId: string, platformRole: PlatformRole) {
+  return request<{ user: AuthUser }>(`/admin/users/${encodeURIComponent(userId)}/platform-role`, {
+    method: 'PATCH',
+    body: JSON.stringify({ platformRole }),
+  });
+}
+
 export { CODE_TARGET_META };
 export type { CodeTarget };
 
@@ -396,21 +729,30 @@ export const SEVERITY_LABEL: Record<Severity, string> = {
   LOW: 'Low',
 };
 
-export const CATEGORY_LABEL: Record<string, string> = {
-  functional: 'Functional',
-  performance: 'Performance',
-  visualMobile: 'Visual / Mobile',
-  accessibility: 'Accessibility',
-  bestPractices: 'Best Practices',
-  seo: 'SEO',
-  securityHygiene: 'Security Hygiene',
-};
+/** Now defined in @origami/contracts (apps/api's report renderers need the same labels) — re-exported here unchanged so no existing import site needs to change. */
+export { CATEGORY_LABEL } from '@origami/contracts';
 
 export const STATUS_LABEL: Record<IssueStatus, string> = {
   open: 'Open',
   in_progress: 'In Progress',
   resolved: 'Resolved',
   ignored: 'Ignored',
+};
+
+/** Friendly display names for `Issue.source` — the detector that found the issue. Used by the Issue Detail page's header/sidebar; every IssueSource value must stay covered here. */
+export const SOURCE_LABEL: Record<IssueSource, string> = {
+  playwright: 'Playwright',
+  cdp: 'Chrome DevTools Protocol',
+  lighthouse: 'Lighthouse',
+  'axe-core': 'axe-core',
+  'origami-rule': 'Origami Rule Engine',
+  'vision-ai': 'Vision AI',
+};
+
+export const REPOSITORY_ROLE_LABEL: Record<RepositoryRole, string> = {
+  FRONTEND: 'Frontend',
+  BACKEND: 'Backend',
+  FULL_STACK: 'Full Stack',
 };
 
 /* -------------------------------------------------------------------- */
@@ -423,6 +765,11 @@ export function githubLoginUrl(): string {
   return `${AUTH_BASE}/auth/github/login`;
 }
 
+/** Full-page navigation (not a fetch) — Google's OAuth redirect requires a real top-level browser navigation. A second login option (alongside GitHub above) for users with no GitHub/GitLab/Bitbucket account. */
+export function googleLoginUrl(): string {
+  return `${AUTH_BASE}/auth/google/login`;
+}
+
 export async function fetchCurrentUser(): Promise<AuthMeResponse> {
   const res = await fetch(`${AUTH_BASE}/auth/me`, { credentials: 'include' });
   if (!res.ok) return { user: null };
@@ -431,6 +778,71 @@ export async function fetchCurrentUser(): Promise<AuthMeResponse> {
 
 export async function logout(): Promise<void> {
   await fetch(`${AUTH_BASE}/auth/logout`, { method: 'POST', credentials: 'include' });
+}
+
+/** Same auth-endpoint convention as fetchCurrentUser/logout above (raw fetch against AUTH_BASE, not API_BASE) — errors are parsed the same way request() does, so callers can show err.message/err.code (e.g. WEAK_PASSWORD, EMAIL_ALREADY_REGISTERED, INVALID_CREDENTIALS). */
+/**
+ * Deliberately does NOT auto-toast (unlike request() above) — every caller
+ * (login/register/forgot-password/reset-password) already renders a
+ * dedicated, well-placed inline `.auth-error` right next to the form field
+ * for every failure case (wrong password, weak password, email already
+ * registered, invalid/expired reset token, ...). Adding a toast on top
+ * would just double the same message, which spec §5 explicitly warns
+ * against. A 401 here also isn't a "session expired" event — it's simply
+ * "wrong credentials" on the login page itself — so the request()'s
+ * redirect-to-/login-on-401 behavior would be nonsensical here too.
+ */
+async function authRequest<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${AUTH_BASE}${path}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string; errorCode?: string };
+    throw new ApiRequestError(err.error ?? `Request failed (${res.status})`, err.errorCode);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function registerWithEmail(input: RegisterRequest): Promise<{ user: AuthUser }> {
+  return authRequest('/auth/register', input);
+}
+
+export function loginWithEmail(input: LoginRequest): Promise<{ user: AuthUser }> {
+  return authRequest('/auth/login', input);
+}
+
+export function requestPasswordReset(input: ForgotPasswordRequest): Promise<ForgotPasswordResponse> {
+  return authRequest('/auth/forgot-password', input);
+}
+
+export function resetPassword(input: ResetPasswordRequest): Promise<{ ok: true }> {
+  return authRequest('/auth/reset-password', input);
+}
+
+export function verifyEmail(input: VerifyEmailRequest): Promise<{ ok: true }> {
+  return authRequest('/auth/verify-email', input);
+}
+
+export function resendVerificationEmail(input: ResendVerificationEmailRequest): Promise<ResendVerificationEmailResponse> {
+  return authRequest('/auth/resend-verification-email', input);
+}
+
+/** Phase 3 — the one-time onboarding answer. Can be called again later to change it; there's no lock. */
+export async function setPersona(persona: Persona): Promise<AuthMeResponse> {
+  const res = await fetch(`${AUTH_BASE}/auth/persona`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ persona }),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new ApiRequestError(err.error ?? `Request failed (${res.status})`);
+  }
+  return res.json() as Promise<AuthMeResponse>;
 }
 
 /* -------------------------------------------------------------------- */
@@ -460,6 +872,16 @@ export async function fetchProviderConnections(): Promise<ListProviderConnection
   return res.json() as Promise<ListProviderConnectionsResponse>;
 }
 
-export async function disconnectProvider(connectionId: string): Promise<void> {
-  await fetch(`${AUTH_BASE}/providers/connections/${encodeURIComponent(connectionId)}`, { method: 'DELETE', credentials: 'include' });
+export interface DisconnectProviderResult {
+  ok: boolean;
+  /** Set only when the connection was GitHub and the real App-installation removal on GitHub's side failed — the local connection is still removed either way, but the App may remain installed on GitHub until removed there too. */
+  githubUninstallError?: string;
+  /** Always true for a Bitbucket disconnect — Bitbucket Cloud has no API for an app to revoke its own authorization, so the local connection is removed but Bitbucket itself must be revoked manually. Not a failure/error like githubUninstallError — this is simply always the case for this provider. */
+  bitbucketManualRevokeRequired?: boolean;
+}
+
+export async function disconnectProvider(connectionId: string): Promise<DisconnectProviderResult> {
+  const res = await fetch(`${AUTH_BASE}/providers/connections/${encodeURIComponent(connectionId)}`, { method: 'DELETE', credentials: 'include' });
+  if (!res.ok) return { ok: false };
+  return res.json() as Promise<DisconnectProviderResult>;
 }

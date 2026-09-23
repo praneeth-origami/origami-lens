@@ -22,6 +22,8 @@ export interface PersistedActiveScan {
   error?: string;
   healthScore?: number;
   totalIssues?: number;
+  /** Consecutive failed status-poll attempts (network error or non-2xx response) — see scan-coordinator.ts's refreshActiveScanFromBackend. Resets to 0 on any successful poll. Bounds how long a scan can appear to be "still running" when the backend is actually unreachable or erroring, instead of polling silently forever. */
+  pollFailureCount?: number;
 }
 
 export const TERMINAL_SCAN_STATUSES = [

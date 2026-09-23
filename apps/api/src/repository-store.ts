@@ -28,10 +28,18 @@ export class RepositoryStore {
     return this.repositories.get(id);
   }
 
-  /** Phase 16/B — the authorization-aware lookup for the no-Postgres fallback path: undefined for "doesn't exist" and "exists but isn't yours" identically. */
-  getByIdForUser(id: string, userId: string): Repository | undefined {
+  /** Phase 2 — the authorization-aware lookup for the no-Postgres fallback path: undefined for "doesn't exist" and "exists but isn't yours" identically. */
+  getByIdForOrganizations(id: string, organizationIds: string[]): Repository | undefined {
     const repository = this.repositories.get(id);
-    return repository && repository.userId === userId ? repository : undefined;
+    return repository && repository.organizationId && organizationIds.includes(repository.organizationId) ? repository : undefined;
+  }
+
+  /** Returns false for "doesn't exist" and "exists but isn't yours" identically, same generic-404 convention as every other ForOrganizations method here. */
+  deleteForOrganizations(id: string, organizationIds: string[]): boolean {
+    if (!this.getByIdForOrganizations(id, organizationIds)) return false;
+    this.repositories.delete(id);
+    this.persistToDisk();
+    return true;
   }
 
   /** Unlike ComponentJobStore.listJobs() (which ignores ownerId entirely in its no-Postgres fallback), this filters correctly so owner isolation holds even without Postgres configured. */
@@ -41,17 +49,17 @@ export class RepositoryStore {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  /** Phase 16/B — the only listing a real, authenticated caller ever gets: always scoped to their own userId. */
-  listForUser(userId: string): Repository[] {
+  /** Phase 2 — the only listing a real, authenticated caller ever gets: always scoped to every organization they belong to. */
+  listForOrganizations(organizationIds: string[]): Repository[] {
     return Array.from(this.repositories.values())
-      .filter((r) => r.userId === userId)
+      .filter((r) => r.organizationId && organizationIds.includes(r.organizationId))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  /** True if an existing repository already matches this owner+normalizedUrl+branch combination — mirrors the Postgres unique constraint for the no-Postgres fallback path. Phase 16/B: "owner" now means the authenticated userId, not the legacy client-supplied ownerId. */
-  findDuplicate(userId: string | undefined, repoUrl: string, branch: string): Repository | undefined {
+  /** True if an existing repository already matches this owner+normalizedUrl+branch combination — mirrors the Postgres unique constraint for the no-Postgres fallback path. Phase 2: "owner" now means the organizationId, not the legacy client-supplied ownerId or the audit-only userId. */
+  findDuplicate(organizationId: string | undefined, repoUrl: string, branch: string): Repository | undefined {
     return Array.from(this.repositories.values()).find(
-      (r) => r.userId === userId && r.repoUrl === repoUrl && r.branch === branch,
+      (r) => r.organizationId === organizationId && r.repoUrl === repoUrl && r.branch === branch,
     );
   }
 

@@ -1,4 +1,4 @@
-import type { Repository, RepositoryProvider } from '@origami/contracts';
+import type { Repository, RepositoryProvider, RepositoryRole } from '@origami/contracts';
 import { DuplicateRepositoryError, RepositoryRepository } from './db/repository-repository.js';
 import { RepositoryStore } from './repository-store.js';
 
@@ -6,11 +6,22 @@ export { DuplicateRepositoryError };
 
 export interface CreateRepositoryInput {
   id: string;
-  /** The authenticated owner (Phase 16/B) — always request.user.id, never client-supplied. */
+  /** Who created this connection (audit only) — always request.user.id, never client-supplied. */
   userId: string;
+  /**
+   * The real ownership boundary (Phase 2) — always the creating user's
+   * organization, resolved server-side (see index.ts's resolveOrganizationIds),
+   * never client-supplied. Optional and defaults to `userId` only so the many
+   * existing single-user worker/service tests that predate organizations
+   * don't all need updating to pass one explicitly — every real production
+   * caller resolves and passes a real organization id.
+   */
+  organizationId?: string;
   repoUrl: string;
   provider: RepositoryProvider;
   branch: string;
+  /** Which layer this repository represents (migration 019) — optional, defaults to FULL_STACK (matches every pre-existing repository) when omitted. */
+  role?: RepositoryRole;
 }
 
 export class UnifiedRepositoryStore {
@@ -21,15 +32,16 @@ export class UnifiedRepositoryStore {
     return this.repo;
   }
 
-  /** Throws DuplicateRepositoryError if this user+repoUrl+branch is already connected — checked against the legacy store first (fast path, always available) and authoritatively enforced by Postgres's own unique constraint when configured. */
+  /** Throws DuplicateRepositoryError if this organization+repoUrl+branch is already connected — checked against the legacy store first (fast path, always available) and authoritatively enforced by Postgres's own unique constraint when configured. */
   async create(input: CreateRepositoryInput): Promise<Repository> {
-    const existing = this.legacy.findDuplicate(input.userId, input.repoUrl, input.branch);
+    const organizationId = input.organizationId ?? input.userId;
+    const existing = this.legacy.findDuplicate(organizationId, input.repoUrl, input.branch);
     if (existing) {
       throw new DuplicateRepositoryError();
     }
 
     if (this.repo.isEnabled()) {
-      const created = await this.repo.create(input);
+      const created = await this.repo.create({ ...input, organizationId });
       this.legacy.save(created);
       return created;
     }
@@ -38,10 +50,12 @@ export class UnifiedRepositoryStore {
     const created: Repository = {
       id: input.id,
       userId: input.userId,
+      organizationId,
       repoUrl: input.repoUrl,
       provider: input.provider,
       branch: input.branch,
       status: 'CONNECTED',
+      role: input.role ?? 'FULL_STACK',
       createdAt: now,
       updatedAt: now,
     };
@@ -73,16 +87,39 @@ export class UnifiedRepositoryStore {
     return this.legacy.getById(id);
   }
 
-  /** Phase 16/B — the authorization-aware lookup: filters at the SQL layer when Postgres is configured, so a row belonging to another user never leaves the database. Returns undefined for "doesn't exist" and "exists but isn't yours" identically. */
-  async getByIdForUserAsync(id: string, userId: string): Promise<Repository | undefined> {
+  /** Phase 2 — the authorization-aware lookup: filters at the SQL layer when Postgres is configured, so a row belonging to another organization never leaves the database. Returns undefined for "doesn't exist" and "exists but isn't yours" identically. Takes every organization the caller belongs to (today always exactly their one personal org). */
+  async getByIdForOrganizationsAsync(id: string, organizationIds: string[]): Promise<Repository | undefined> {
     if (this.repo.isEnabled()) {
       try {
-        return await this.repo.getByIdForUser(id, userId);
+        return await this.repo.getByIdForOrganizations(id, organizationIds);
       } catch (error) {
         console.error('[unified-repository-store] Postgres read failed, falling back to legacy store:', error instanceof Error ? error.message : error);
       }
     }
-    return this.legacy.getByIdForUser(id, userId);
+    return this.legacy.getByIdForOrganizations(id, organizationIds);
+  }
+
+  /**
+   * Deletes a repository (and, when Postgres is configured, everything
+   * cascaded from it — clone/index/embedding jobs, repository issues, fix
+   * workflows) but only if it belongs to one of the caller's organizations.
+   * Removed from BOTH stores when both are active, mirroring create()'s
+   * dual-write, so the legacy mirror never resurrects a repository the real
+   * store already deleted. Returns false for "doesn't exist" and "exists
+   * but isn't yours" identically. The on-disk clone workspace is NOT
+   * removed here — see index.ts's DELETE /repositories/:id route.
+   */
+  async deleteForOrganizationsAsync(id: string, organizationIds: string[]): Promise<boolean> {
+    let deleted = false;
+    if (this.repo.isEnabled()) {
+      try {
+        deleted = await this.repo.deleteForOrganizations(id, organizationIds);
+      } catch (error) {
+        console.error('[unified-repository-store] Postgres delete failed:', error instanceof Error ? error.message : error);
+      }
+    }
+    const deletedFromLegacy = this.legacy.deleteForOrganizations(id, organizationIds);
+    return deleted || deletedFromLegacy;
   }
 
   async listAsync(ownerId?: string): Promise<Repository[]> {
@@ -96,15 +133,15 @@ export class UnifiedRepositoryStore {
     return this.legacy.list(ownerId);
   }
 
-  /** Phase 16/B — the only listing a real, authenticated caller ever gets: always scoped to their own userId, never an optional filter. */
-  async listForUserAsync(userId: string): Promise<Repository[]> {
+  /** Phase 2 — the only listing a real, authenticated caller ever gets: always scoped to every organization they belong to, never an optional filter. */
+  async listForOrganizationsAsync(organizationIds: string[]): Promise<Repository[]> {
     if (this.repo.isEnabled()) {
       try {
-        return await this.repo.listForUser(userId);
+        return await this.repo.listForOrganizations(organizationIds);
       } catch (error) {
         console.error('[unified-repository-store] Postgres read failed, falling back to legacy store:', error instanceof Error ? error.message : error);
       }
     }
-    return this.legacy.listForUser(userId);
+    return this.legacy.listForOrganizations(organizationIds);
   }
 }

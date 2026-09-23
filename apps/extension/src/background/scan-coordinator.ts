@@ -35,6 +35,32 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * How long a persisted "in progress" scan can go without a single update
+ * before it's treated as orphaned rather than genuinely still running.
+ * MV3 background service workers are not guaranteed to survive a long-lived
+ * task — Chrome can terminate one mid-fetch (idle/lifetime limits, browser
+ * restart, crash) — which would otherwise leave chrome.storage.local
+ * permanently stuck at RUNNING/QUEUED with nothing left to ever resolve it:
+ * every future scan attempt would then be silently rejected forever by the
+ * "already in progress" guards below, which is exactly the "click scan,
+ * spins forever" failure this closes. CURRENT_PAGE scans are one bounded
+ * fetch (120s timeout, see startCurrentPageScan) so anything past a couple
+ * of minutes with zero progress is already impossible if the worker is
+ * actually still alive; WEBSITE scans poll and bump updatedAt roughly every
+ * minute for as long as they're genuinely progressing, so a real multi-page
+ * crawl never trips this even if it legitimately runs long.
+ */
+const STALE_ACTIVE_SCAN_AGE_MS: Record<PersistedActiveScan['scanType'], number> = {
+  CURRENT_PAGE: 3 * 60 * 1000,
+  WEBSITE: 10 * 60 * 1000,
+};
+
+function isActiveScanStale(active: PersistedActiveScan): boolean {
+  const maxAgeMs = STALE_ACTIVE_SCAN_AGE_MS[active.scanType];
+  return Date.now() - new Date(active.updatedAt).getTime() > maxAgeMs;
+}
+
 async function ensurePollAlarm(): Promise<void> {
   const existing = await chrome.alarms.get(SCAN_POLL_ALARM);
   if (!existing) {
@@ -44,6 +70,29 @@ async function ensurePollAlarm(): Promise<void> {
 
 async function clearPollAlarm(): Promise<void> {
   await chrome.alarms.clear(SCAN_POLL_ALARM);
+}
+
+/** After this many consecutive failed poll attempts (~5 minutes at the 1-minute alarm interval), stop polling and surface a real error instead of leaving the popup showing "scanning" forever. */
+const MAX_POLL_FAILURES = 5;
+
+async function recordPollFailure(active: PersistedActiveScan): Promise<PersistedActiveScan> {
+  const pollFailureCount = (active.pollFailureCount ?? 0) + 1;
+  if (pollFailureCount < MAX_POLL_FAILURES) {
+    const updated = { ...active, pollFailureCount };
+    await setActiveScan(updated);
+    return updated;
+  }
+
+  await clearPollAlarm();
+  const failed: PersistedActiveScan = {
+    ...active,
+    status: 'FAILED',
+    error: 'Lost contact with the Origami Lens API while this scan was running. Please try again.',
+    updatedAt: nowIso(),
+    pollFailureCount,
+  };
+  await setActiveScan(failed);
+  return failed;
 }
 
 export async function refreshActiveScanFromBackend(): Promise<PersistedActiveScan | null> {
@@ -62,7 +111,7 @@ export async function refreshActiveScanFromBackend(): Promise<PersistedActiveSca
     const res = await fetch(`${API_BASE}/scans/${active.scanId}/status`, {
       signal: AbortSignal.timeout(10000),
     });
-    if (!res.ok) return active;
+    if (!res.ok) return recordPollFailure(active);
 
     const status = (await res.json()) as ScanStatusResponse;
     const updated: PersistedActiveScan = {
@@ -72,6 +121,7 @@ export async function refreshActiveScanFromBackend(): Promise<PersistedActiveSca
       updatedAt: nowIso(),
       error: status.error,
       healthScore: status.healthScore?.overallScore,
+      pollFailureCount: 0,
     };
 
     if (isTerminalStatus(status.status)) {
@@ -105,7 +155,7 @@ export async function refreshActiveScanFromBackend(): Promise<PersistedActiveSca
     await ensurePollAlarm();
     return updated;
   } catch {
-    return active;
+    return recordPollFailure(active);
   }
 }
 
@@ -128,7 +178,7 @@ export async function startWebsiteScan(
   options: WebsiteScanOptions,
 ): Promise<{ ok: boolean; scanId?: string; error?: string }> {
   const existing = await getActiveScan();
-  if (existing && isInProgressStatus(existing.status)) {
+  if (existing && isInProgressStatus(existing.status) && !isActiveScanStale(existing)) {
     return {
       ok: false,
       error: `A ${existing.scanType === 'WEBSITE' ? 'website' : 'page'} scan is already in progress.`,
@@ -208,7 +258,7 @@ export async function startCurrentPageScan(
   pageEvidence: unknown,
 ): Promise<{ ok: boolean; scan?: ScanResult; error?: string }> {
   const existing = await getActiveScan();
-  if (existing && isInProgressStatus(existing.status)) {
+  if (existing && isInProgressStatus(existing.status) && !isActiveScanStale(existing)) {
     return {
       ok: false,
       error: `A ${existing.scanType === 'WEBSITE' ? 'website' : 'page'} scan is already in progress.`,
@@ -301,6 +351,23 @@ export async function getScanState(): Promise<PersistedActiveScan | null> {
 
   if (active.scanType === 'WEBSITE' && isInProgressStatus(active.status)) {
     return refreshActiveScanFromBackend();
+  }
+
+  // A CURRENT_PAGE scan has no server-side poll to fall back on (it's one
+  // bounded fetch, not a queued job) — if the background service worker
+  // that was running that fetch got terminated mid-flight (see
+  // isActiveScanStale's doc comment), nothing would otherwise ever move
+  // this out of RUNNING. Surface it as a real, retryable error the moment
+  // the user reopens the popup, instead of leaving the spinner up forever.
+  if (isInProgressStatus(active.status) && isActiveScanStale(active)) {
+    const failed: PersistedActiveScan = {
+      ...active,
+      status: 'FAILED',
+      error: 'This scan did not finish — the browser may have paused the extension while it was running. Please try again.',
+      updatedAt: nowIso(),
+    };
+    await setActiveScan(failed);
+    return failed;
   }
 
   return active;

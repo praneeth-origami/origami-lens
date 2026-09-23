@@ -56,7 +56,18 @@ export interface FixWorkflowProviderDeps {
 
 export interface FixWorkflowParams {
   repositoryId: string;
+  /** The caller's organization id — used only for the repository-access check (`canAccessRepository`), never for provider credential lookups (those are per-user, see `callerUserId`). */
   ownerId?: string;
+  /**
+   * The authenticated caller's real user id (`request.user.id`) — required for
+   * provider credential resolution (`getPushCredentials`/`validateRemoteAccess`/
+   * `getRepositoryInfo`/`createPullRequest` all key on a real user id, e.g.
+   * `provider_connections.user_id`, never an organization id). Falls back to
+   * `ownerId` when omitted so existing callers/tests that only ever supplied a
+   * single id (and never exercised the real per-user provider-connection
+   * lookup) keep behaving exactly as before.
+   */
+  callerUserId?: string;
 }
 
 function envString(name: string): string | undefined {
@@ -95,7 +106,7 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 
 function validateRepositoryForWorkflow(repository: Repository | undefined, ownerId: string | undefined): asserts repository is Repository {
   if (!repository) throw new FixWorkflowError('Repository not found.', 'REPOSITORY_NOT_FOUND');
-  if (!canAccessRepository(repository.userId, ownerId)) throw new FixWorkflowError('Repository not found.', 'REPOSITORY_ACCESS_DENIED');
+  if (!canAccessRepository(repository.organizationId, ownerId)) throw new FixWorkflowError('Repository not found.', 'REPOSITORY_ACCESS_DENIED');
   if (NOT_YET_INDEXED_STATUSES.has(repository.status)) throw new FixWorkflowError('Repository must be indexed before a fix can be reviewed.', 'REPOSITORY_NOT_READY');
 }
 
@@ -321,20 +332,26 @@ export async function approveFindingFix(
     if (!parsedUrl.ok) return await fail('GIT_REMOTE_UNAVAILABLE', 'Could not resolve the repository owner/name from its URL.');
     const { owner, name } = parsedUrl.value;
 
-    // Phase 16/C: credentials are resolved for THIS authenticated user
-    // (params.ownerId is always request.user.id — never client-supplied)
-    // and THIS specific repository — never a global, shared credential.
+    // Phase 16/C: credentials are resolved for THIS authenticated user and
+    // THIS specific repository — never a global, shared credential.
+    // `callerUserId` (the real request.user.id) is what provider-connection
+    // lookups (e.g. provider_connections.user_id) are keyed on — `ownerId` is
+    // the caller's ORGANIZATION id (used above only for the repository-access
+    // check) and must never be passed here: an org id will never match a
+    // per-user connection row. `callerUserId` falls back to `ownerId` only
+    // for callers that never distinguished the two (see FixWorkflowParams).
+    const credentialUserId = params.callerUserId ?? params.ownerId;
     let pushCredentials;
     try {
-      // Safe: validateRepositoryForWorkflow above already proved params.ownerId is a real, defined string matching repository.userId — it cannot be undefined here.
-      pushCredentials = await provider.getPushCredentials(params.ownerId!, owner, name, signal);
+      // Safe: validateRepositoryForWorkflow above already proved params.ownerId is a real, defined string, and credentialUserId falls back to it — it cannot be undefined here.
+      pushCredentials = await provider.getPushCredentials(credentialUserId!, owner, name, signal);
     } catch (error) {
       if (error instanceof RepositoryProviderError) return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
       return await fail('GIT_AUTH_NOT_CONFIGURED', `${provider.provider} authentication is not configured.`);
     }
 
     try {
-      await provider.validateRemoteAccess(params.ownerId!, owner, name, signal);
+      await provider.validateRemoteAccess(credentialUserId!, owner, name, signal);
     } catch (error) {
       if (error instanceof RepositoryProviderError && (error.category === 'AUTH_NOT_CONFIGURED' || error.category === 'AUTH_FAILED')) {
         return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
@@ -370,11 +387,11 @@ export async function approveFindingFix(
 
     let baseBranch: string | undefined = repository.branch;
     if (!baseBranch) {
-      baseBranch = await getRemoteDefaultBranch(workflow.workspaceDir, signal);
+      baseBranch = await getRemoteDefaultBranch(workflow.workspaceDir, signal, pushCredentials);
     }
     if (!baseBranch) {
       try {
-        const info = await provider.getRepositoryInfo(params.ownerId!, owner, name, signal);
+        const info = await provider.getRepositoryInfo(credentialUserId!, owner, name, signal);
         baseBranch = info.defaultBranch;
       } catch {
         baseBranch = 'main';
@@ -387,7 +404,7 @@ export async function approveFindingFix(
       const candidate = attempt === 1 ? branchName : buildFixBranchName(finding.id, finding.title, attempt);
       let existsRemotely: boolean;
       try {
-        existsRemotely = await branchExistsOnRemote(workflow.workspaceDir, candidate, signal);
+        existsRemotely = await branchExistsOnRemote(workflow.workspaceDir, candidate, signal, pushCredentials);
       } catch (error) {
         return await fail('GIT_REMOTE_UNAVAILABLE', error instanceof Error ? error.message : 'Failed to check for a colliding branch on the remote.');
       }
@@ -435,7 +452,7 @@ export async function approveFindingFix(
     let pr;
     try {
       pr = await provider.createPullRequest(
-        params.ownerId!,
+        credentialUserId!,
         { owner, repo: name, title: buildPrTitle(finding), body: buildPrBody(finding, updatedWorkflow), head: branchName, base: baseBranch },
         signal,
       );

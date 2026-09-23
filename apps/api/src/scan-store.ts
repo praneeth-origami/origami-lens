@@ -60,6 +60,21 @@ export class ScanStore {
     return scan ? migrateScan(scan) : undefined;
   }
 
+  /** Returns false for "doesn't exist" and "exists but isn't yours" identically, same generic-404 convention as every other ForOrganizations method here. */
+  deleteScanForOrganizations(scanId: string, organizationIds: string[]): boolean {
+    if (!this.getScanForOrganizations(scanId, organizationIds)) return false;
+    this.scans.delete(scanId);
+    this.persistToDisk();
+    return true;
+  }
+
+  /** The authorization-aware lookup for the no-Postgres fallback path: undefined for "doesn't exist" and "exists but isn't yours" identically. */
+  getScanForOrganizations(scanId: string, organizationIds: string[]): ScanResponse | undefined {
+    const scan = this.getScan(scanId);
+    if (!scan || !scan.organizationId || !organizationIds.includes(scan.organizationId)) return undefined;
+    return scan;
+  }
+
   listScans(): ScanListItem[] {
     return Array.from(this.scans.values())
       .map((s) => ({
@@ -67,6 +82,28 @@ export class ScanStore {
         url: s.url,
         overallScore: s.healthScore.overallScore,
         totalIssues: s.summary.totalIssues,
+        critical: s.summary.critical,
+        high: s.summary.high,
+        medium: s.summary.medium,
+        low: s.summary.low,
+        scannedAt: s.scannedAt,
+      }))
+      .sort((a, b) => new Date(b.scannedAt).getTime() - new Date(a.scannedAt).getTime());
+  }
+
+  /** The only listing a real, authenticated caller ever gets: always scoped to every organization they belong to. */
+  listScansForOrganizations(organizationIds: string[]): ScanListItem[] {
+    return Array.from(this.scans.values())
+      .filter((s) => s.organizationId && organizationIds.includes(s.organizationId))
+      .map((s) => ({
+        scanId: s.scanId,
+        url: s.url,
+        overallScore: s.healthScore.overallScore,
+        totalIssues: s.summary.totalIssues,
+        critical: s.summary.critical,
+        high: s.summary.high,
+        medium: s.summary.medium,
+        low: s.summary.low,
         scannedAt: s.scannedAt,
       }))
       .sort((a, b) => new Date(b.scannedAt).getTime() - new Date(a.scannedAt).getTime());
@@ -80,11 +117,38 @@ export class ScanStore {
     return undefined;
   }
 
+  /** The authorization-aware lookup for the no-Postgres fallback path: an issue belongs to whichever scan found it. */
+  getIssueForOrganizations(issueId: string, organizationIds: string[]): { issue: Issue; scan: ScanResponse } | undefined {
+    const found = this.getIssue(issueId);
+    if (!found || !found.scan.organizationId || !organizationIds.includes(found.scan.organizationId)) return undefined;
+    return found;
+  }
+
   updateIssueStatus(issueId: string, status: IssueStatus): Issue | undefined {
     for (const scan of this.scans.values()) {
       const idx = scan.issues.findIndex((i) => i.id === issueId);
       if (idx >= 0) {
         scan.issues[idx] = { ...scan.issues[idx], status };
+        this.scans.set(scan.scanId, scan);
+        this.persistToDisk();
+        return scan.issues[idx];
+      }
+    }
+    return undefined;
+  }
+
+  /** The authorization-aware mutation for the no-Postgres fallback path — verifies the issue's scan belongs to one of the caller's organizations before writing. */
+  updateIssueStatusForOrganizations(issueId: string, status: IssueStatus, organizationIds: string[]): Issue | undefined {
+    if (!this.getIssueForOrganizations(issueId, organizationIds)) return undefined;
+    return this.updateIssueStatus(issueId, status);
+  }
+
+  /** Persists which repository a finding's AI fix/PR should target (see repository-finding-resolution-service.ts) — same shape as updateIssueStatus, just a different field. */
+  updateIssueRepository(issueId: string, repositoryId: string): Issue | undefined {
+    for (const scan of this.scans.values()) {
+      const idx = scan.issues.findIndex((i) => i.id === issueId);
+      if (idx >= 0) {
+        scan.issues[idx] = { ...scan.issues[idx], repositoryId };
         this.scans.set(scan.scanId, scan);
         this.persistToDisk();
         return scan.issues[idx];

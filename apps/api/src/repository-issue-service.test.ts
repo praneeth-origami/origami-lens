@@ -57,7 +57,7 @@ describe('createRepositoryIssue', () => {
   it('creates an issue with the repository current indexed commit, never a client-supplied one', async () => {
     const stores = fakeStores();
     const issue = await createRepositoryIssue(
-      { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' },
       stores,
       { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'Bug', description: 'Something is wrong' },
     );
@@ -70,7 +70,7 @@ describe('createRepositoryIssue', () => {
   it('accepts a valid filePath and symbol that exist in the index', async () => {
     const stores = fakeStores();
     const issue = await createRepositoryIssue(
-      { id: 'repo-1', userId: 'owner-a', status: 'READY_FOR_SEARCH' },
+      { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'READY_FOR_SEARCH' },
       stores,
       { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'Bug', description: 'D', filePath: 'src/auth/login.ts', symbol: 'authenticateUser', lineStart: 1, lineEnd: 5 },
     );
@@ -87,63 +87,63 @@ describe('createRepositoryIssue', () => {
 
   it('rejects a wrong-owner request with the same generic error as not-found', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-b', title: 'T', description: 'D' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-b', title: 'T', description: 'D' }),
       (e: unknown) => e instanceof IssueError && e.code === 'REPOSITORY_ACCESS_DENIED',
     );
   });
 
   it('rejects a repository that has never been indexed', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'CONNECTED' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'CONNECTED' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D' }),
       (e: unknown) => e instanceof IssueError && e.code === 'REPOSITORY_NOT_READY',
     );
   });
 
   it('rejects an empty title', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: '   ', description: 'D' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: '   ', description: 'D' }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
 
   it('rejects an empty description', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: '' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: '' }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
 
   it('rejects an invalid severity', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', severity: 'EXTREME' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', severity: 'EXTREME' }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
 
   it('rejects a filePath that does not exist in the indexed commit', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: 'src/does-not-exist.ts' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: 'src/does-not-exist.ts' }),
       (e: unknown) => e instanceof IssueError && e.code === 'FILE_NOT_FOUND',
     );
   });
 
   it('rejects a symbol that does not exist in the indexed commit', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', symbol: 'doesNotExist' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', symbol: 'doesNotExist' }),
       (e: unknown) => e instanceof IssueError && e.code === 'SYMBOL_NOT_FOUND',
     );
   });
 
   it('rejects an absolute filePath', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: '/etc/passwd' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: '/etc/passwd' }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
 
   it('rejects a filePath containing ../ traversal', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: '../../etc/passwd' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: '../../etc/passwd' }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
@@ -151,21 +151,21 @@ describe('createRepositoryIssue', () => {
   it('rejects a sensitive filePath even if somehow present in the index', async () => {
     const stores = fakeStores({ files: [{ ...SAMPLE_FILE, filePath: '.env' }] });
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: '.env' }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', filePath: '.env' }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
 
   it('rejects lineStart without lineEnd', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', lineStart: 5 }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', lineStart: 5 }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
 
   it('rejects lineEnd before lineStart', async () => {
     await assert.rejects(
-      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', lineStart: 10, lineEnd: 5 }),
+      () => createRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, fakeStores(), { repositoryId: 'repo-1', ownerId: 'owner-a', title: 'T', description: 'D', lineStart: 10, lineEnd: 5 }),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_VALIDATION_FAILED',
     );
   });
@@ -178,7 +178,7 @@ describe('getRepositoryIssue / listRepositoryIssues', () => {
       severity: 'MEDIUM', status: 'OPEN', source: 'USER_REPORTED', createdAt: 'x', updatedAt: 'x',
     };
     const stores = fakeStores({ issues: [issue] });
-    const result = await getRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, 'issue-1', 'owner-a');
+    const result = await getRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, 'issue-1', 'owner-a');
     assert.equal(result.id, 'issue-1');
   });
 
@@ -189,7 +189,7 @@ describe('getRepositoryIssue / listRepositoryIssues', () => {
     };
     const stores = fakeStores({ issues: [issue] });
     await assert.rejects(
-      () => getRepositoryIssue({ id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, 'issue-1', 'owner-a'),
+      () => getRepositoryIssue({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, stores, 'issue-1', 'owner-a'),
       (e: unknown) => e instanceof IssueError && e.code === 'ISSUE_NOT_FOUND',
     );
   });
@@ -200,7 +200,7 @@ describe('getRepositoryIssue / listRepositoryIssues', () => {
       severity: 'MEDIUM', status: 'OPEN', source: 'USER_REPORTED', createdAt: 'x', updatedAt: 'x',
     };
     const stores = fakeStores({ issues: [issue] });
-    const repo = { id: 'repo-1', userId: 'owner-a', status: 'EMBEDDINGS_READY' };
+    const repo = { id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' };
 
     await assert.rejects(
       () => getRepositoryIssue(repo, stores, 'issue-1', 'owner-b'),

@@ -1,8 +1,9 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AuthUser } from '@origami/contracts';
-import { AuthError, loginWithGitHub, logout, resolveSessionUser } from './auth-service.js';
+import { AuthError, loginWithGitHub, loginWithGoogle, logout, resolveSessionUser } from './auth-service.js';
 import { GitHubOAuthError } from './auth-github-oauth.js';
+import { GoogleOAuthError } from './auth-google-oauth.js';
 import type { SessionWithUser } from './db/session-repository.js';
 
 const originalTtl = process.env.SESSION_TTL_MS;
@@ -66,6 +67,142 @@ describe('auth-service — loginWithGitHub', () => {
       (error: unknown) => error instanceof GitHubOAuthError,
     );
     assert.equal(sessionCreated, false);
+  });
+});
+
+describe('auth-service — Phase 2 personal organization creation on login', () => {
+  it('loginWithGitHub calls organizationRepo.getOrCreatePersonalOrganization for the logged-in user when the dep is provided', async () => {
+    const orgCalls: Array<{ userId: string; displayName: string }> = [];
+    const user = fakeUser('user-1');
+
+    await loginWithGitHub('code-abc', {
+      userRepo: { upsertByProviderAccount: async () => user },
+      sessionRepo: { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+      organizationRepo: {
+        getOrCreatePersonalOrganization: async (userId, displayName) => {
+          orgCalls.push({ userId, displayName });
+          return { id: 'org-1' };
+        },
+      },
+      completeGitHubOAuthLogin: async () => ({ id: 999, login: 'octocat', email: 'octocat@example.com', name: 'The Octocat', avatarUrl: null }),
+    });
+
+    assert.equal(orgCalls.length, 1);
+    assert.equal(orgCalls[0].userId, 'user-1');
+    assert.equal(orgCalls[0].displayName, 'The Octocat');
+  });
+
+  it('loginWithGitHub falls back to primaryProviderLogin for the org name when the user has no displayName', async () => {
+    const orgCalls: Array<{ displayName: string }> = [];
+    const user: AuthUser = { id: 'user-2', primaryProvider: 'GITHUB', primaryProviderLogin: 'octocat-login' };
+
+    await loginWithGitHub('code-abc', {
+      userRepo: { upsertByProviderAccount: async () => user },
+      sessionRepo: { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+      organizationRepo: { getOrCreatePersonalOrganization: async (_userId, displayName) => { orgCalls.push({ displayName }); return { id: 'org-2' }; } },
+      completeGitHubOAuthLogin: async () => ({ id: 1, login: 'octocat-login', email: null, name: null, avatarUrl: null }),
+    });
+
+    assert.equal(orgCalls[0].displayName, 'octocat-login');
+  });
+
+  it('loginWithGitHub still succeeds when organizationRepo is omitted (existing callers/tests that don\'t care about organizations)', async () => {
+    const result = await loginWithGitHub('code-abc', {
+      userRepo: { upsertByProviderAccount: async () => fakeUser('user-3') },
+      sessionRepo: { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+      completeGitHubOAuthLogin: async () => ({ id: 1, login: 'octocat', email: null, name: null, avatarUrl: null }),
+    });
+    assert.ok(result.sessionId);
+  });
+
+  it('loginWithGoogle calls organizationRepo.getOrCreatePersonalOrganization for the logged-in user when the dep is provided', async () => {
+    const orgCalls: Array<{ userId: string }> = [];
+    const user: AuthUser = { id: 'user-4', primaryProvider: 'GOOGLE', primaryProviderLogin: 'Jane Doe', email: 'jane@example.com', displayName: 'Jane Doe' };
+
+    await loginWithGoogle('code-xyz', {
+      userRepo: { upsertByProviderAccount: async () => user },
+      sessionRepo: { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+      organizationRepo: { getOrCreatePersonalOrganization: async (userId) => { orgCalls.push({ userId }); return { id: 'org-3' }; } },
+      completeGoogleOAuthLogin: async () => ({ id: '110169484474386276334', email: 'jane@example.com', name: 'Jane Doe', avatarUrl: null }),
+    });
+
+    assert.equal(orgCalls.length, 1);
+    assert.equal(orgCalls[0].userId, 'user-4');
+  });
+});
+
+describe('auth-service — loginWithGoogle', () => {
+  it('upserts the user from the Google profile with primaryProvider GOOGLE and creates a session for that user', async () => {
+    const upsertCalls: unknown[] = [];
+    const createCalls: unknown[] = [];
+    const user: AuthUser = { id: 'user-1', primaryProvider: 'GOOGLE', primaryProviderLogin: 'Jane Doe', email: 'jane@example.com', displayName: 'Jane Doe' };
+
+    const result = await loginWithGoogle('code-abc', {
+      userRepo: {
+        upsertByProviderAccount: async (input) => { upsertCalls.push(input); return user; },
+      },
+      sessionRepo: {
+        create: async (input) => { createCalls.push(input); },
+        getValidByIdAndTouch: async () => undefined,
+        deleteById: async () => {},
+      },
+      completeGoogleOAuthLogin: async () => ({ id: '110169484474386276334', email: 'jane@example.com', name: 'Jane Doe', avatarUrl: null }),
+    });
+
+    assert.equal(result.user.id, 'user-1');
+    assert.equal(upsertCalls.length, 1);
+    const upserted = upsertCalls[0] as { primaryProvider: string; primaryProviderAccountId: string; primaryProviderLogin: string };
+    assert.equal(upserted.primaryProvider, 'GOOGLE');
+    assert.equal(upserted.primaryProviderAccountId, '110169484474386276334');
+    assert.equal(upserted.primaryProviderLogin, 'Jane Doe');
+    assert.equal(createCalls.length, 1);
+    assert.equal((createCalls[0] as { userId: string }).userId, 'user-1');
+    assert.ok(result.sessionId);
+  });
+
+  it('falls back primaryProviderLogin to email, then to the opaque account id, when Google reports no name', async () => {
+    let capturedLogin = '';
+    const capture = (input: { primaryProviderLogin: string }) => { capturedLogin = input.primaryProviderLogin; return fakeUser('user-1'); };
+
+    await loginWithGoogle('code-1', {
+      userRepo: { upsertByProviderAccount: async (i) => capture(i) },
+      sessionRepo: { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+      completeGoogleOAuthLogin: async () => ({ id: 'sub-1', email: 'only-email@example.com', name: null, avatarUrl: null }),
+    });
+    assert.equal(capturedLogin, 'only-email@example.com');
+
+    await loginWithGoogle('code-2', {
+      userRepo: { upsertByProviderAccount: async (i) => capture(i) },
+      sessionRepo: { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+      completeGoogleOAuthLogin: async () => ({ id: 'sub-2', email: null, name: null, avatarUrl: null }),
+    });
+    assert.equal(capturedLogin, 'sub-2');
+  });
+
+  it('propagates GoogleOAuthError from the OAuth exchange without creating a session', async () => {
+    let sessionCreated = false;
+    await assert.rejects(
+      () => loginWithGoogle('bad-code', {
+        userRepo: { upsertByProviderAccount: async () => fakeUser('user-1') },
+        sessionRepo: { create: async () => { sessionCreated = true; }, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} },
+        completeGoogleOAuthLogin: async () => { throw new GoogleOAuthError('rejected', 'OAUTH_EXCHANGE_FAILED'); },
+      }),
+      (error: unknown) => error instanceof GoogleOAuthError,
+    );
+    assert.equal(sessionCreated, false);
+  });
+
+  it('a GitHub account and a Google account with an unrelated identifier never collide — distinct provider+account-id pairs upsert independently', async () => {
+    const upserted: unknown[] = [];
+    const userRepo = { upsertByProviderAccount: async (input: unknown) => { upserted.push(input); return fakeUser('user-x'); } };
+    const sessionRepo = { create: async () => {}, getValidByIdAndTouch: async () => undefined, deleteById: async () => {} };
+
+    await loginWithGitHub('code-a', { userRepo, sessionRepo, completeGitHubOAuthLogin: async () => ({ id: 999, login: 'octocat', email: null, name: null, avatarUrl: null }) });
+    await loginWithGoogle('code-b', { userRepo, sessionRepo, completeGoogleOAuthLogin: async () => ({ id: '999', email: null, name: null, avatarUrl: null }) });
+
+    assert.equal(upserted.length, 2);
+    assert.equal((upserted[0] as { primaryProvider: string }).primaryProvider, 'GITHUB');
+    assert.equal((upserted[1] as { primaryProvider: string }).primaryProvider, 'GOOGLE');
   });
 });
 

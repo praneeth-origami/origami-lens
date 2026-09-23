@@ -164,7 +164,7 @@ async function searchByVectorFallback(
  * deterministic fakes for both — see repository-search-service.test.ts.
  */
 export async function searchRepository(
-  repository: { id: string; ownerId?: string; userId?: string; status: string } | undefined,
+  repository: { id: string; ownerId?: string; userId?: string; organizationId?: string; status: string } | undefined,
   stores: RepositorySearchStores,
   params: SearchRequestParams,
   deps: SearchProviderDeps = defaultSearchProviderDeps(),
@@ -178,7 +178,7 @@ export async function searchRepository(
   if (!repository) {
     throw new SearchError('Repository not found.', 'REPOSITORY_NOT_FOUND');
   }
-  if (!canAccessRepository(repository.userId, params.ownerId)) {
+  if (!canAccessRepository(repository.organizationId, params.ownerId)) {
     // Same "not found" response whether the repository truly doesn't exist
     // or simply doesn't belong to this owner — never confirms existence to
     // a caller it doesn't belong to (matches every other repository route).

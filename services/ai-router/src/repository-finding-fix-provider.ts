@@ -273,11 +273,45 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 /**
+ * Bugfix: even with temperature 0 and schema-constrained decoding (see the
+ * doc comments below), a 7B local model occasionally still emits a
+ * structurally invalid JSON body — a stray unescaped quote, a dropped
+ * bracket — and previously that single bad sampling pass permanently failed
+ * the whole user-facing request (the BullMQ job itself is `attempts: 1`,
+ * see repository-fix-proposal-worker.ts).
+ *
+ * Bugfix 3: the first retry attempt (below) reused temperature 0 for the
+ * retry, which is exactly wrong — temperature 0 is greedy/deterministic
+ * decoding, so retrying with the SAME prompt at the SAME temperature
+ * reproduces the SAME malformed output byte-for-byte (confirmed live: two
+ * consecutive failures reported the identical content length and error
+ * offset). A retry only has a chance of succeeding if it can actually
+ * sample a different continuation, so the retry now runs at a small
+ * non-zero temperature (RETRY_TEMPERATURE) instead of reusing config's
+ * temperature 0. Deliberately NOT retried at all: timeout, cancellation, or
+ * provider-unavailable — none of those are JSON-shape problems, and
+ * retrying them would just double the wait for an already-known-bad
+ * outcome instead of fixing anything.
+ */
+const RETRY_TEMPERATURE = 0.2;
+
+export async function proposeFindingFix(config: FindingFixConfig, request: FindingFixRequest, signal?: AbortSignal): Promise<FindingFixResult> {
+  try {
+    return await attemptFindingFix(config, request, signal);
+  } catch (error) {
+    if (error instanceof FindingFixInvalidResponseError) {
+      return attemptFindingFix(config, request, signal, RETRY_TEMPERATURE);
+    }
+    throw error;
+  }
+}
+
+/**
  * Single request/response round trip. Never asked to apply/execute/commit
  * anything — this task's only job is proposing a reviewable change
  * description from the evidence it is given.
  */
-export async function proposeFindingFix(config: FindingFixConfig, request: FindingFixRequest, signal?: AbortSignal): Promise<FindingFixResult> {
+async function attemptFindingFix(config: FindingFixConfig, request: FindingFixRequest, signal?: AbortSignal, temperatureOverride?: number): Promise<FindingFixResult> {
   const userContent = [
     request.contextText,
     '',
@@ -293,17 +327,20 @@ export async function proposeFindingFix(config: FindingFixConfig, request: Findi
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userContent },
     ],
-    // 0, not the previous 0.2 — a real, live A/B test (6 trials each, same
-    // nested multi-file/multi-hunk prompt) showed 3/6 malformed-JSON
-    // failures at temperature 0.2 vs 0/6 at temperature 0. Structured
-    // grammar-constrained decoding is only as reliable as the token it
-    // actually samples at each step; temperature 0 always takes the
-    // highest-probability (most likely globally consistent) continuation
+    // 0, not the previous 0.2, for the FIRST attempt — a real, live A/B test
+    // (6 trials each, same nested multi-file/multi-hunk prompt) showed 3/6
+    // malformed-JSON failures at temperature 0.2 vs 0/6 at temperature 0.
+    // Structured grammar-constrained decoding is only as reliable as the
+    // token it actually samples at each step; temperature 0 always takes
+    // the highest-probability (most likely globally consistent) continuation
     // instead of occasionally sampling a lower-probability one that goes on
     // to violate the JSON grammar. This task wants a deterministic, exactly-
     // grounded proposal, never creative variation, so 0 is also the
-    // semantically correct choice, not only the more reliable one.
-    temperature: 0,
+    // semantically correct choice for a first attempt, not only the more
+    // reliable one. `temperatureOverride` is used only for the one retry
+    // proposeFindingFix issues after temperature 0 itself produced a
+    // malformed response — see RETRY_TEMPERATURE's doc comment above.
+    temperature: temperatureOverride ?? 0,
     max_tokens: config.maxTokens,
     stream: false,
   };

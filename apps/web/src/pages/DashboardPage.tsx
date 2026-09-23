@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { AggregatedIssue, Issue, IssueCategory, IssueFilters, ScanResponse } from '@origami/contracts';
 import {
+  fetchRepositories,
   fetchScan,
   fetchScanIssues,
   fetchScanStatus,
   fetchScans,
   type SeverityTab,
 } from '../api/client';
+import { lensEvent } from '../notifications/lens-event';
 import {
   CategoryScoreList,
-  HealthScoreCard,
-  IssueSummaryCards,
-  KeyMetrics,
+  HealthSummary,
   ScanSummary,
 } from '../components/ScanSummary';
 import { IssueFiltersBar } from '../components/IssueFilters';
@@ -21,10 +21,43 @@ import { EmptyState, ErrorState, LoadingSkeleton } from '../components/StateView
 import { ScreenshotViewer } from '../components/ScreenshotViewer';
 import { PagesTable, WebsiteScanPanel } from '../components/WebsiteScanPanel';
 import { RecentActivity } from '../components/RecentActivity';
+import { PersonaCta } from '../components/PersonaCta';
+import { Disclosure } from '../components/Disclosure';
 
 type ScanWithMeta = ScanResponse & { issuesByCategory?: Record<string, number> };
 
 const TERMINAL_STATUSES = ['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'FAILED', 'CANCELLED'];
+
+function totalIssueCount(scanData: ScanWithMeta): number {
+  if (!scanData.issuesByCategory) return 0;
+  return Object.values(scanData.issuesByCategory).reduce((sum, n) => sum + n, 0);
+}
+
+/** Morphs the scan's own Lens Active card into its terminal state (spec §14) — callers guard this against re-firing per scan via a ref (see the two polling effects below), since either can independently detect the same terminal transition. */
+function completeScanEvent(eventId: string, scanData: ScanWithMeta): void {
+  if (scanData.status === 'FAILED') {
+    lensEvent.complete(eventId, { type: 'error', title: 'Scan failed', resource: scanData.url, detail: 'Please try again.' });
+  } else if (scanData.status === 'CANCELLED') {
+    lensEvent.complete(eventId, { type: 'warning', title: 'Scan cancelled', resource: scanData.url });
+  } else if (scanData.status === 'COMPLETED' || scanData.status === 'COMPLETED_WITH_WARNINGS') {
+    const count = totalIssueCount(scanData);
+    lensEvent.complete(eventId, {
+      type: 'success',
+      title: 'Scan completed',
+      resource: scanData.url,
+      detail: count > 0 ? `${count} issue${count === 1 ? '' : 's'} detected` : 'No issues found',
+    });
+  }
+}
+
+/** Same as RepositoriesListPage.tsx's own repoName — duplicated locally rather than shared, matching this codebase's existing convention for small single-purpose display helpers. */
+function repoName(repoUrl: string): string {
+  try {
+    return new URL(repoUrl).pathname.replace(/^\//, '');
+  } catch {
+    return repoUrl;
+  }
+}
 
 export function DashboardPage() {
   const { scanId: paramScanId } = useParams();
@@ -38,6 +71,19 @@ export function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [severityTab, setSeverityTab] = useState<SeverityTab>('all');
   const [filters, setFilters] = useState<IssueFilters>({ sort: 'severity' });
+  const [repositoryNamesById, setRepositoryNamesById] = useState<Record<string, string>>({});
+  /** Tracks this scan's own Lens Active card — both polling effects below can independently detect the same in-progress/terminal transitions, and either effect can re-run (e.g. when the user changes a filter mid-scan) without the scan itself having changed, so this is keyed by scanId rather than recreated on every effect run. */
+  const activeScanEventRef = useRef<{ scanId: string; eventId: string } | null>(null);
+
+  function getOrCreateScanEvent(scanId: string, scanData: ScanWithMeta): string {
+    if (activeScanEventRef.current?.scanId === scanId) return activeScanEventRef.current.eventId;
+    const eventId = lensEvent.active({
+      title: scanData.scanType === 'WEBSITE' ? 'Scanning website' : 'Running inspection',
+      resource: scanData.url,
+    });
+    activeScanEventRef.current = { scanId, eventId };
+    return eventId;
+  }
 
   const activeScanId = paramScanId ?? history[0]?.scanId;
   const isFresh = searchParams.get('fresh') === '1';
@@ -86,6 +132,12 @@ export function DashboardPage() {
   }, [loadHistory]);
 
   useEffect(() => {
+    fetchRepositories()
+      .then((res) => setRepositoryNamesById(Object.fromEntries(res.repositories.map((r) => [r.id, repoName(r.repoUrl)]))))
+      .catch(() => setRepositoryNamesById({}));
+  }, []);
+
+  useEffect(() => {
     if (!activeScanId) {
       setLoading(false);
       return;
@@ -110,7 +162,19 @@ export function DashboardPage() {
       attempts += 1;
       const data = await loadScan(activeScanId, true);
       if (data) {
-        if (!data.status || TERMINAL_STATUSES.includes(data.status) || attempts >= maxAttempts) {
+        const isTerminal = Boolean(data.status && TERMINAL_STATUSES.includes(data.status));
+        const alreadyTracked = activeScanEventRef.current?.scanId === activeScanId;
+        if (!isTerminal && !alreadyTracked) {
+          getOrCreateScanEvent(activeScanId, data);
+        } else if (!isTerminal && alreadyTracked && data.progress) {
+          const { completedPages, discoveredPages } = data.progress;
+          const pct = discoveredPages > 0 ? Math.round((completedPages / discoveredPages) * 100) : undefined;
+          lensEvent.updateProgress(activeScanEventRef.current!.eventId, { progress: pct, detail: `${completedPages} / ${discoveredPages} pages` });
+        } else if (isTerminal && alreadyTracked) {
+          completeScanEvent(activeScanEventRef.current!.eventId, data);
+          activeScanEventRef.current = null;
+        }
+        if (!data.status || isTerminal || attempts >= maxAttempts) {
           clearInterval(id);
           searchParams.delete('fresh');
           setSearchParams(searchParams, { replace: true });
@@ -131,9 +195,21 @@ export function DashboardPage() {
       try {
         const status = await fetchScanStatus(activeScanId);
         if (TERMINAL_STATUSES.includes(status.status)) {
-          await loadScan(activeScanId, true);
+          const data = await loadScan(activeScanId, true);
+          if (data && activeScanEventRef.current?.scanId === activeScanId) {
+            completeScanEvent(activeScanEventRef.current.eventId, data);
+            activeScanEventRef.current = null;
+          }
           clearInterval(id);
         } else {
+          if (scan && activeScanEventRef.current?.scanId !== activeScanId) {
+            getOrCreateScanEvent(activeScanId, scan);
+          }
+          if (activeScanEventRef.current?.scanId === activeScanId && status.progress) {
+            const { completedPages, discoveredPages } = status.progress;
+            const pct = discoveredPages > 0 ? Math.round((completedPages / discoveredPages) * 100) : undefined;
+            lensEvent.updateProgress(activeScanEventRef.current.eventId, { progress: pct, detail: `${completedPages} / ${discoveredPages} pages` });
+          }
           setScan((prev) =>
             prev
               ? { ...prev, status: status.status, progress: status.progress, healthScore: status.healthScore ?? prev.healthScore }
@@ -168,27 +244,26 @@ export function DashboardPage() {
     );
   }
 
+  const hasPages = Boolean(scan?.pages && scan.pages.length > 0);
+
   return (
     <div className="dashboard">
+      <PersonaCta />
+
       {loading && <LoadingSkeleton />}
 
       {!loading && !scan && <EmptyState hasScans={history.length > 0} />}
 
       {!loading && scan && (
         <>
+          {/* 1. Scan/site identity */}
           <ScanSummary scan={scan} scans={history} activeScanId={activeScanId} onSelectScan={handleSelectScan} />
 
-          <div className="hero-grid animate-in">
-            <HealthScoreCard scan={scan} />
-            <KeyMetrics scan={scan} />
-          </div>
+          {/* 2. Health Score + issue summary, consolidated into one strip */}
+          <HealthSummary scan={scan} />
 
+          {/* 3. Compact category summary */}
           <CategoryScoreList scan={scan} onSelectCategory={handleSelectCategory} />
-
-          <WebsiteScanPanel scan={scan} />
-          <PagesTable scanId={scan.scanId} pages={scan.pages} />
-
-          <ScreenshotViewer scanId={scan.scanId} artifacts={scan.artifacts} />
 
           {scan.aiSummary?.summary && (
             <section className="ai-summary-block animate-in">
@@ -197,11 +272,12 @@ export function DashboardPage() {
             </section>
           )}
 
+          {/* 4. Issues — the primary section */}
           <section id="issues-section" className="issues-section animate-in">
             <div className="page-heading-row">
-              <h2 className="section-title">Issues Found</h2>
+              <h2 className="section-title">Issues</h2>
+              <span className="issues-total">{scan.summary.totalIssues} total</span>
             </div>
-            <IssueSummaryCards scan={scan} />
 
             {scan.summary.totalIssues === 0 ? (
               <div className="empty-state inline">
@@ -215,12 +291,26 @@ export function DashboardPage() {
                   filters={filters}
                   onFiltersChange={setFilters}
                 />
-                <IssueList issues={issues} />
+                <IssueList issues={issues} repositoryNamesById={repositoryNamesById} />
               </>
             )}
           </section>
 
-          <RecentActivity scans={history} activeScanId={activeScanId} onSelect={handleSelectScan} />
+          {/* 5. Everything below is real, complete data kept behind
+              progressive disclosure so it doesn't compete with the issues
+              above for vertical space — nothing here is removed. */}
+          {scan.scanType === 'WEBSITE' && (
+            <Disclosure title="Website scan details" meta={hasPages ? `${scan.pages!.length} pages` : undefined}>
+              <WebsiteScanPanel scan={scan} />
+              <PagesTable scanId={scan.scanId} pages={scan.pages} />
+            </Disclosure>
+          )}
+
+          <ScreenshotViewer scanId={scan.scanId} artifacts={scan.artifacts} />
+
+          <Disclosure title="Recent activity">
+            <RecentActivity scans={history} activeScanId={activeScanId} onSelect={handleSelectScan} />
+          </Disclosure>
         </>
       )}
     </div>

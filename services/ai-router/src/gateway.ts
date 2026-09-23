@@ -1,4 +1,4 @@
-import type { AiGatewayRequest, AiGatewayResponse, AiTask, GenerationErrorCategory, Issue } from '@origami/contracts';
+import type { AiGatewayRequest, AiGatewayResponse, AiTask, CodeTarget, GenerationErrorCategory, Issue } from '@origami/contracts';
 
 /** Thrown by callVllm on a non-2xx model-server response; carries the HTTP status for structured logging. */
 export class AiRequestError extends Error {
@@ -117,6 +117,56 @@ function validatedTimeoutMs(envValue: string | undefined, defaultMs: number, min
     return defaultMs;
   }
   return parsed;
+}
+
+function validatedNumCtx(envValue: string | undefined, defaultCtx: number, minCtx: number, label: string): number {
+  if (envValue === undefined || envValue === '') return defaultCtx;
+  const parsed = Number(envValue);
+  if (!Number.isFinite(parsed) || parsed < minCtx) {
+    console.error(JSON.stringify({ event: 'invalid_num_ctx_config', label, providedValue: envValue, minCtx, fallbackCtx: defaultCtx }));
+    return defaultCtx;
+  }
+  return parsed;
+}
+
+/**
+ * Ollama serves each model with a fixed context window (default observed:
+ * 4096 tokens) unless a caller overrides it per-request via `options.num_ctx`
+ * on the chat-completions body. screenshot_to_code/generate_component prompts
+ * routinely exceed 4096 once the image + DOM/HTML representation is included
+ * (a real request measured at 4765 tokens was rejected outright with a 400
+ * "exceed_context_size_error" — not a timeout, not a network issue, just the
+ * window being too small), so every Ollama call requests a larger window.
+ * Configurable via AI_OLLAMA_NUM_CTX for environments with different model
+ * sizes/VRAM budgets; the floor matches Ollama's own common default so a
+ * misconfigured value can never make the window smaller than before.
+ */
+const OLLAMA_NUM_CTX = validatedNumCtx(process.env.AI_OLLAMA_NUM_CTX, 8192, 4096, 'AI_OLLAMA_NUM_CTX');
+
+/**
+ * Ollama's native /api/chat expects `message.content` to be a plain string,
+ * with any image(s) in a separate `images: string[]` array of bare base64
+ * (no `data:image/...;base64,` prefix) — sending it the OpenAI-style
+ * multimodal content array (`content: [{type:'text',...},{type:'image_url',
+ * image_url:{url:'data:...'}}]`, built by buildUserMessage for the OpenAI-
+ * compatible path shared with vLLM) fails outright with "json: cannot
+ * unmarshal array into Go struct field ChatRequest.messages.content of type
+ * string" — confirmed empirically, not a hypothetical. This is a real
+ * request-shape divergence between the two APIs, not just the `options`
+ * field difference that motivated switching to the native endpoint in the
+ * first place.
+ */
+function toOllamaMessage(
+  message: { role: 'user'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> },
+): { role: 'user'; content: string; images?: string[] } {
+  if (typeof message.content === 'string') {
+    return { role: 'user', content: message.content };
+  }
+  const text = message.content.filter((p) => p.type === 'text').map((p) => p.text ?? '').join('\n');
+  const images = message.content
+    .filter((p) => p.type === 'image_url' && p.image_url?.url)
+    .map((p) => (p.image_url!.url.includes(',') ? p.image_url!.url.split(',')[1] : p.image_url!.url));
+  return images.length > 0 ? { role: 'user', content: text, images } : { role: 'user', content: text };
 }
 
 /**
@@ -533,33 +583,63 @@ export class OrigamiAiGateway {
     const timeoutMs = task === 'generate_component'
       ? validatedTimeoutMs(process.env.AI_CODE_GENERATION_TIMEOUT_MS, DEFAULT_CODE_GENERATION_TIMEOUT_MS, MIN_MODEL_TIMEOUT_MS, 'AI_CODE_GENERATION_TIMEOUT_MS')
       : validatedTimeoutMs(process.env.AI_MODEL_TIMEOUT_MS, isOllama ? 140_000 : 45_000, MIN_MODEL_TIMEOUT_MS, 'AI_MODEL_TIMEOUT_MS');
-    const requestBody: Record<string, unknown> = {
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        userMessage,
-      ],
-      temperature: 0.3,
-      // generate_component/fix_code return multi-file source and
-      // screenshot_to_code returns a fairly verbose UI description — the
-      // previous flat 1024-token budget silently truncated these into
-      // invalid JSON (observed as "Unterminated string in JSON..."), which
-      // then got misreported as the model being unavailable.
-      max_tokens: MAX_TOKENS_BY_TASK[task] ?? DEFAULT_MAX_TOKENS,
-      stream: false,
-    };
+    const maxTokens = MAX_TOKENS_BY_TASK[task] ?? DEFAULT_MAX_TOKENS;
+
+    // Ollama's OpenAI-compatible /v1/chat/completions endpoint silently
+    // DROPS an `options` field (confirmed empirically: /api/ps kept reporting
+    // context_length: 4096 after sending options.num_ctx there, even on a
+    // guaranteed-cold model load) — only its own native /api/chat endpoint
+    // actually resizes the loaded context. Ollama's native API also expects
+    // generation parameters (temperature, the output-length cap) nested
+    // under `options` rather than top-level, so the two request shapes
+    // genuinely diverge, not just this one field.
+    let requestBody: Record<string, unknown>;
     if (isOllama) {
-      requestBody.format = 'json';
+      requestBody = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          toOllamaMessage(userMessage),
+        ],
+        format: 'json',
+        stream: false,
+        options: {
+          temperature: 0.3,
+          // generate_component/fix_code return multi-file source and
+          // screenshot_to_code returns a fairly verbose UI description — the
+          // previous flat 1024-token budget silently truncated these into
+          // invalid JSON (observed as "Unterminated string in JSON..."),
+          // which then got misreported as the model being unavailable.
+          num_predict: maxTokens,
+          num_ctx: OLLAMA_NUM_CTX,
+        },
+      };
     } else {
-      requestBody.response_format = { type: 'json_object' };
+      requestBody = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          userMessage,
+        ],
+        temperature: 0.3,
+        max_tokens: maxTokens,
+        stream: false,
+        response_format: { type: 'json_object' },
+      };
     }
 
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const signal = externalSignal ? AbortSignal.any([timeoutSignal, externalSignal]) : timeoutSignal;
 
+    // Ollama's OpenAI-compat base URL is configured as .../v1 — its native
+    // API lives one level up, at .../api/chat, not .../v1/chat/completions.
+    const url = isOllama
+      ? `${this.config.baseUrl.replace(/\/?v1\/?$/, '')}/api/chat`
+      : `${this.config.baseUrl}/chat/completions`;
+
     let response: Response;
     try {
-      response = await fetch(`${this.config.baseUrl}/chat/completions`, {
+      response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -593,11 +673,12 @@ export class OrigamiAiGateway {
       );
     }
 
-    const data = (await response.json()) as {
-      choices: Array<{ message: { content: string } }>;
-    };
-
-    const content = data.choices[0]?.message?.content ?? '{}';
+    // Native Ollama responses are shaped { message: { content } }; the
+    // OpenAI-compatible shape (vLLM, and any other OpenAI-compatible
+    // provider) is { choices: [{ message: { content } }] }.
+    const content = isOllama
+      ? ((await response.json()) as { message?: { content?: string } }).message?.content ?? '{}'
+      : ((await response.json()) as { choices: Array<{ message: { content: string } }> }).choices[0]?.message?.content ?? '{}';
     try {
       return JSON.parse(extractJsonPayload(content)) as Record<string, unknown>;
     } catch (error) {
@@ -662,18 +743,43 @@ export class OrigamiAiGateway {
       case 'screenshot_to_code':
         return `${base} You are analyzing a cropped screenshot of one UI region plus its DOM/CSS context. Describe its visual structure so a coding model can rebuild it. Do not describe the whole page, only the selected region. Replace any real personal names, emails, phone numbers, or account data visible in the screenshot with generic placeholders (e.g. "User Name", "user@example.com") in your description — never repeat real personal data verbatim. Return: {"suggestedComponentName":"PascalCaseName","summary":"","sections":[{"role":"","description":""}],"colors":[],"typography":{"headingFont":"","bodyFont":""},"layout":""}`;
       case 'generate_component': {
-        // A prior real HTML_CSS generation returned syntactically valid JSON
-        // that nonetheless didn't use the files:[{path,content}] shape (see
-        // the parsing diagnosis) — the previous prompt asked for that shape
-        // but never explicitly forbade the plausible alternative (top-level
-        // html/css fields) a model might reach for on an HTML_CSS target.
-        // This is a stronger, still task-generic contract statement plus a
-        // concrete example matched to the actual target for this call.
-        const isHtmlCss = payload?.target === 'HTML_CSS';
-        const example = isHtmlCss
-          ? '{"componentName":"ExampleComponent","files":[{"path":"example.html","content":"<div>...</div>"},{"path":"example.css","content":".example { ... }"}],"dependencies":[],"notes":[]}'
-          : '{"componentName":"ExampleComponent","files":[{"path":"ExampleComponent.jsx","content":"..."}],"dependencies":[],"notes":[]}';
-        return `${base} You generate a single reusable frontend component from a structured UI description plus DOM/CSS evidence. Recreate structure, spacing, typography, colors, borders, radius, shadows, and responsive layout using normal Flexbox/Grid — no unnecessary absolute positioning, no unnecessary dependencies, no fake APIs, no secrets. Use only generic placeholder text/data (never reproduce real personal names, emails, phone numbers, or payment data — use "User Name", "user@example.com"-style placeholders instead). Name the component meaningfully from its purpose (e.g. PricingCard, Navbar, LoginForm) — never "Component1", "TestComponent", or "AIComponent". The request payload's "target" and "targetMeta" fields tell you which files to produce — follow targetMeta.primaryExtension for the file(s) you create. Output contract, exactly: "files" MUST be a JSON array. Every entry in "files" MUST have a "path" field (the filename) and a "content" field (the complete source for that file) — these two field names are required exactly as written, not "filename", "code", "source", or any other name. Do NOT return top-level "html", "css", "jsx", "tsx", or "code" fields instead of "files" — always place every file inside the "files" array, even for an HTML/CSS target that only needs two files. Do not wrap the JSON in markdown code fences. Do not include any text, explanation, or markdown outside the JSON object. Return ONLY the JSON object, exactly matching this shape: ${example}`;
+        // Root cause of "always generates HTML regardless of selected
+        // target": this prompt used to be near-identical for all four
+        // targets — REACT/NEXT_JS/TAILWIND shared one generic ".jsx"
+        // example and a single vague "follow targetMeta.primaryExtension"
+        // instruction, with the actual framework/styling conventions left
+        // entirely to the model to infer. A general-purpose local model
+        // given that little guidance reliably falls back to the output
+        // shape it's most confident about — plain HTML/CSS — regardless of
+        // what target was actually requested. Each target now gets its own
+        // explicit instructions AND its own worked example, so the prompt
+        // itself (not just the payload's target/targetMeta fields, which
+        // the model was never reliably reading) drives the output shape.
+        const target = (payload?.target as CodeTarget | undefined) ?? 'HTML_CSS';
+        const targetMeta = payload?.targetMeta as { label?: string } | undefined;
+        const targetLabel = targetMeta?.label ?? target;
+
+        const TARGET_SPEC: Record<CodeTarget, { instructions: string; example: string }> = {
+          HTML_CSS: {
+            instructions: 'Produce plain, framework-free HTML and CSS: one ".html" file with semantic markup, and one companion ".css" file whose selectors match the classes used in the HTML. Do not use any JavaScript framework, JSX, or build tooling.',
+            example: '{"componentName":"ExampleComponent","files":[{"path":"example.html","content":"<div class=\\"example\\">...</div>"},{"path":"example.css","content":".example { ... }"}],"dependencies":[],"notes":[]}',
+          },
+          REACT: {
+            instructions: 'Produce a single React functional component in one ".jsx" file (never ".html") using JSX syntax, ending with `export default function ComponentName(...) { ... }`. Style it with CSS Modules: create a companion "ComponentName.module.css" file, import it with `import styles from \'./ComponentName.module.css\'`, and apply classes via `className={styles.foo}` — never a top-level "html"/"css" field, never a <style> tag.',
+            example: '{"componentName":"PricingCard","files":[{"path":"PricingCard.jsx","content":"import styles from \'./PricingCard.module.css\';\\n\\nexport default function PricingCard() {\\n  return <div className={styles.card}>...</div>;\\n}"},{"path":"PricingCard.module.css","content":".card { ... }"}],"dependencies":[],"notes":[]}',
+          },
+          NEXT_JS: {
+            instructions: 'Produce a single Next.js-compatible React component in one ".jsx" file (never ".html"), using JSX syntax and `export default function ComponentName(...) { ... }`, compatible with the Next.js App Router. Add a `\'use client\';` directive as the very first line ONLY if the component uses state, effects, or browser event handlers (onClick, onChange, etc.) — omit it for a purely presentational component, since Next.js Server Components cannot use those. Style it with CSS Modules exactly like a React component: a companion "ComponentName.module.css" file, imported and applied via `className={styles.foo}`.',
+            example: '{"componentName":"PricingCard","files":[{"path":"PricingCard.jsx","content":"\'use client\';\\n\\nimport { useState } from \'react\';\\nimport styles from \'./PricingCard.module.css\';\\n\\nexport default function PricingCard() {\\n  const [selected, setSelected] = useState(false);\\n  return <div className={styles.card}>...</div>;\\n}"},{"path":"PricingCard.module.css","content":".card { ... }"}],"dependencies":[],"notes":[]}',
+          },
+          TAILWIND: {
+            instructions: 'Produce a single React functional component in one ".jsx" file (never ".html"), using JSX syntax and `export default function ComponentName(...) { ... }`. Style it ENTIRELY with Tailwind CSS utility classes applied directly in `className` (spacing, color, typography, borders, shadows, flex/grid layout, and responsive variants like `sm:`/`md:`/`lg:` where the original layout is responsive) — do NOT create a separate .css file, do NOT use CSS Modules, do NOT use a <style> tag or inline `style={{}}` for anything Tailwind can express. Only include a "files" entry for the .jsx component itself.',
+            example: '{"componentName":"PricingCard","files":[{"path":"PricingCard.jsx","content":"export default function PricingCard() {\\n  return <div className=\\"rounded-lg shadow-md p-6 bg-white\\">...</div>;\\n}"}],"dependencies":[],"notes":[]}',
+          },
+        };
+        const spec = TARGET_SPEC[target] ?? TARGET_SPEC.HTML_CSS;
+
+        return `${base} You generate a single reusable frontend component from a structured UI description plus DOM/CSS evidence, for the "${targetLabel}" target specifically — the target is fixed by the caller and must not change. Recreate structure, spacing, typography, colors, borders, radius, shadows, and responsive layout using normal Flexbox/Grid — no unnecessary absolute positioning, no unnecessary dependencies, no fake APIs, no secrets. Use only generic placeholder text/data (never reproduce real personal names, emails, phone numbers, or payment data — use "User Name", "user@example.com"-style placeholders instead). Name the component meaningfully from its purpose (e.g. PricingCard, Navbar, LoginForm) — never "Component1", "TestComponent", or "AIComponent". ${spec.instructions} Output contract, exactly: "files" MUST be a JSON array. Every entry in "files" MUST have a "path" field (the filename) and a "content" field (the complete source for that file) — these two field names are required exactly as written, not "filename", "code", "source", or any other name. Do NOT return top-level "html", "css", "jsx", "tsx", or "code" fields instead of "files" — always place every file inside the "files" array. Do not wrap the JSON in markdown code fences. Do not include any text, explanation, or markdown outside the JSON object. Return ONLY the JSON object, exactly matching this shape: ${spec.example}`;
       }
       default:
         return base;

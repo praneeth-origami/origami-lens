@@ -123,7 +123,7 @@ function validateProposalEnvelope(
  * returned — never a partially-applied "success".
  */
 export async function applyFindingFix(
-  repository: { id: string; ownerId?: string; userId?: string; status: string } | undefined,
+  repository: { id: string; ownerId?: string; userId?: string; organizationId?: string; status: string } | undefined,
   finding: Issue | undefined,
   proposal: RepositoryFixProposalResponse | undefined,
   stores: FixApplicationStores,
@@ -134,7 +134,7 @@ export async function applyFindingFix(
   if (!repository) {
     throw new FixApplicationError('Repository not found.', 'REPOSITORY_NOT_FOUND');
   }
-  if (!canAccessRepository(repository.userId, params.ownerId)) {
+  if (!canAccessRepository(repository.organizationId, params.ownerId)) {
     throw new FixApplicationError('Repository not found.', 'REPOSITORY_ACCESS_DENIED');
   }
   if (NOT_YET_INDEXED_STATUSES.has(repository.status)) {

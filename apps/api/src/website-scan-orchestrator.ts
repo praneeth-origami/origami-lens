@@ -174,6 +174,7 @@ export async function createWebsiteScanRecord(
   rootUrl: string,
   options: WebsiteScanOptions,
   ownerId?: string,
+  organizationId?: string,
 ): Promise<string> {
   const scanId = randomUUID();
   const resolved = resolveWebsiteOptions(options);
@@ -183,6 +184,7 @@ export async function createWebsiteScanRecord(
     scanType: 'WEBSITE',
     rootUrl,
     ownerId,
+    organizationId,
     discoveryMethod: resolved.discoveryMethod,
     maxPages: resolved.maxPages,
     status: 'QUEUED',

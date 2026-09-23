@@ -34,6 +34,19 @@ describeIfDb('SessionRepository (migration 011, real Postgres)', () => {
     assert.equal(resolved?.user.id, userId);
   });
 
+  it('resolves the user\'s persona through the session lookup, not just at getById (regression — rowToSessionWithUser must map every users column)', async () => {
+    const userId = await createFixtureUser();
+    const userRepo = new UserRepository();
+    await userRepo.updatePersona(userId, 'DESIGNER');
+
+    const sessionRepo = new SessionRepository();
+    const sessionId = randomUUID();
+    await sessionRepo.create({ id: sessionId, userId, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+
+    const resolved = await sessionRepo.getValidByIdAndTouch(sessionId);
+    assert.equal(resolved?.user.persona, 'DESIGNER');
+  });
+
   it('returns undefined for an expired session (never treats it as valid)', async () => {
     const userId = await createFixtureUser();
     const sessionRepo = new SessionRepository();

@@ -4,6 +4,8 @@ import { getPool } from './pool.js';
 interface CreateComponentJobInput {
   jobId: string;
   ownerId?: string;
+  /** The real ownership boundary (UX audit follow-up) — always the creating user's organization, resolved server-side, never client-supplied. */
+  organizationId?: string;
   sourceUrl: string;
   pageTitle?: string;
   target: CodeTarget;
@@ -19,9 +21,9 @@ export class ComponentRepository {
     if (!pool) throw new Error('Database not configured');
 
     await pool.query(
-      `INSERT INTO component_jobs (id, owner_id, source_url, page_title, target, status)
-       VALUES ($1, $2, $3, $4, $5, 'QUEUED')`,
-      [input.jobId, input.ownerId ?? null, input.sourceUrl, input.pageTitle ?? null, input.target],
+      `INSERT INTO component_jobs (id, owner_id, organization_id, source_url, page_title, target, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'QUEUED')`,
+      [input.jobId, input.ownerId ?? null, input.organizationId ?? null, input.sourceUrl, input.pageTitle ?? null, input.target],
     );
   }
 
@@ -89,6 +91,27 @@ export class ComponentRepository {
     return this.rowToJob(result.rows[0]);
   }
 
+  /** The authorization-aware lookup (UX audit follow-up) — filters at the SQL layer so a job belonging to another organization never leaves the database. Returns undefined for "doesn't exist" and "exists but isn't yours" identically. */
+  async getJobForOrganizations(jobId: string, organizationIds: string[]): Promise<ComponentGenerationJob | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const result = await pool.query(`SELECT * FROM component_jobs WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [jobId, organizationIds]);
+    if (result.rows.length === 0) return undefined;
+    return this.rowToJob(result.rows[0]);
+  }
+
+  /** Scoped to organizationIds so a caller can only ever delete their own job — mirrors RepositoryRepository's deleteForOrganizations. Returns false for "doesn't exist" and "exists but isn't yours" identically. */
+  async deleteForOrganizations(jobId: string, organizationIds: string[]): Promise<boolean> {
+    if (organizationIds.length === 0) return false;
+    const pool = getPool();
+    if (!pool) return false;
+
+    const result = await pool.query(`DELETE FROM component_jobs WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [jobId, organizationIds]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async listJobs(ownerId?: string): Promise<ComponentJobListItem[]> {
     const pool = getPool();
     if (!pool) return [];
@@ -114,10 +137,33 @@ export class ComponentRepository {
     }));
   }
 
+  /** The only listing a real, authenticated caller ever gets (UX audit follow-up) — always scoped to every organization they belong to, never an optional filter. */
+  async listJobsForOrganizations(organizationIds: string[]): Promise<ComponentJobListItem[]> {
+    if (organizationIds.length === 0) return [];
+    const pool = getPool();
+    if (!pool) return [];
+
+    const result = await pool.query(
+      `SELECT id, source_url, component_name, target, status, created_at FROM component_jobs
+       WHERE organization_id = ANY($1::uuid[]) ORDER BY created_at DESC LIMIT 100`,
+      [organizationIds],
+    );
+
+    return result.rows.map((row) => ({
+      jobId: row.id,
+      sourceUrl: row.source_url,
+      componentName: row.component_name ?? undefined,
+      target: row.target,
+      status: row.status,
+      createdAt: row.created_at.toISOString(),
+    }));
+  }
+
   private rowToJob(row: Record<string, unknown>): ComponentGenerationJob {
     return {
       jobId: row.id as string,
       ownerId: (row.owner_id as string) ?? undefined,
+      organizationId: (row.organization_id as string) ?? undefined,
       sourceUrl: row.source_url as string,
       pageTitle: (row.page_title as string) ?? undefined,
       target: row.target as CodeTarget,
