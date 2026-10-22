@@ -5,6 +5,9 @@ import type { Repository, RepositoryRole, RepositoryStatus } from '@origami/cont
 import { createRepository, deleteRepository, fetchRepositories, REPOSITORY_ROLE_LABEL } from '../api/client';
 import { ErrorState } from '../components/StateViews';
 import { ProviderConnections } from '../components/ProviderConnections';
+import { RepoPrStrategyBadge } from '../components/RepoPrStrategyBadge';
+import { useWorkspaceRole } from '../hooks/useWorkspaceRole';
+import { canMutateRepository } from '../utils/workspace-permissions';
 import {
   CodeBracketIcon,
   DatabaseIcon,
@@ -159,6 +162,11 @@ function RowActionsMenu({ items, ariaLabel, busy }: { items: ActionItem[]; ariaL
 
 export function RepositoriesListPage() {
   const navigate = useNavigate();
+  const { role: workspaceRole } = useWorkspaceRole();
+  // The PR-strategy preview route is gated to OWNER/ADMIN (the same role
+  // that can approve a fix) — resolved once here rather than per row, so a
+  // long table doesn't fire N redundant /workspace/role lookups.
+  const canSeePrStrategy = canMutateRepository(workspaceRole ?? undefined);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -272,7 +280,7 @@ export function RepositoriesListPage() {
         </div>
       </div>
 
-      <ProviderConnections />
+      <ProviderConnections repositories={repositories} />
 
       <div className="connect-repo-card">
         <div className="connect-repo-card-header">
@@ -415,6 +423,7 @@ export function RepositoriesListPage() {
                     <th>Provider</th>
                     <th>Branch</th>
                     <th>Status</th>
+                    {canSeePrStrategy && <th>PR Access</th>}
                     <th>Created</th>
                     <th>Updated</th>
                     <th aria-label="Actions" />
@@ -458,6 +467,11 @@ export function RepositoriesListPage() {
                             {statusMeta.label}
                           </span>
                         </td>
+                        {canSeePrStrategy && (
+                          <td data-label="PR Access">
+                            <RepoPrStrategyBadge repositoryId={repo.id} enabled small />
+                          </td>
+                        )}
                         <td data-label="Created">{formatDate(repo.createdAt)}</td>
                         <td data-label="Updated">{formatDate(repo.updatedAt)}</td>
                         <td data-label="Actions" className="repo-actions-cell">

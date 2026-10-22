@@ -28,8 +28,10 @@ import { renderBillingSubscriptionStartedEmail, type BillingSubscriptionStartedE
 import { renderBillingPaymentSuccessfulEmail, type BillingPaymentSuccessfulEmailData } from './email/templates/billing-payment-successful.js';
 import { renderBillingPaymentFailedEmail, type BillingPaymentFailedEmailData } from './email/templates/billing-payment-failed.js';
 import { renderBillingPlanLimitReachedEmail, type BillingPlanLimitReachedEmailData } from './email/templates/billing-plan-limit-reached.js';
+import { renderLeadNotificationEmail, type LeadNotificationEmailData } from './email/templates/lead-notification.js';
 import { renderBillingSubscriptionCancelledEmail, type BillingSubscriptionCancelledEmailData } from './email/templates/billing-subscription-cancelled.js';
 import { renderBillingPlanExpiringSoonEmail, type BillingPlanExpiringSoonEmailData } from './email/templates/billing-plan-expiring-soon.js';
+import { renderMonitoringRegressionDetectedEmail, type MonitoringRegressionDetectedEmailData } from './email/templates/monitoring-regression-detected.js';
 
 export class EmailNotConfiguredError extends Error {
   constructor() {
@@ -114,6 +116,11 @@ export async function sendRepositoryConnectedEmail(to: string, data: RepositoryC
   await deliverEmail(to, renderRepositoryConnectedEmail(data));
 }
 
+/** Internal (Origami-side) notification only — `to` is always LEADS_NOTIFICATION_EMAIL (see lead-service.ts), never the lead's own address. */
+export async function sendLeadNotificationEmail(to: string, data: LeadNotificationEmailData): Promise<void> {
+  await deliverEmail(to, renderLeadNotificationEmail(data));
+}
+
 export async function sendPullRequestCreatedEmail(to: string, data: PullRequestCreatedEmailData): Promise<void> {
   await deliverEmail(to, renderPullRequestCreatedEmail(data));
 }
@@ -152,4 +159,8 @@ export async function sendBillingSubscriptionCancelledEmail(to: string, data: Bi
 
 export async function sendBillingPlanExpiringSoonEmail(to: string, data: BillingPlanExpiringSoonEmailData): Promise<void> {
   await deliverEmail(to, renderBillingPlanExpiringSoonEmail(data));
+}
+
+export async function sendMonitoringRegressionDetectedEmail(to: string, data: MonitoringRegressionDetectedEmailData): Promise<void> {
+  await deliverEmail(to, renderMonitoringRegressionDetectedEmail(data));
 }

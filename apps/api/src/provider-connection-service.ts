@@ -9,6 +9,11 @@ import {
   mintInstallationAccessToken,
 } from './github-app-auth.js';
 import {
+  exchangeGitHubPushCode,
+  fetchGitHubPushProfile,
+  isGitHubPushOAuthConfigured,
+} from './github-push-oauth.js';
+import {
   GitLabOAuthError,
   exchangeGitLabCode,
   fetchGitLabProfile,
@@ -27,6 +32,10 @@ import type { ProviderConnectionRepository } from './db/provider-connection-repo
 
 export interface ProviderConnectionDeps {
   connectionRepo: Pick<ProviderConnectionRepository, 'findActiveForUserAndInstallation' | 'upsertGitHubInstallation'>;
+}
+
+export interface GitHubUserPushConnectionDeps {
+  connectionRepo: Pick<ProviderConnectionRepository, 'findActiveGitHubUserPushConnectionForUser' | 'upsertGitHubUserPushConnection'>;
 }
 
 export interface GitLabConnectionDeps {
@@ -105,6 +114,51 @@ export async function connectGitHubInstallation(
     installationId: installation.id,
     externalAccountLogin: installation.accountLogin,
   });
+}
+
+/**
+ * Completes the "Connect GitHub for direct push access" flow — a genuinely
+ * separate OAuth App from the GitHub App above (see github-push-oauth.ts's
+ * doc comment for why), exchanges the real authorization code for a real
+ * `repo`-scoped access token, encrypts it before persisting, and records the
+ * connection against `userId` — always request.user.id from the
+ * authenticated callback request, never client-supplied.
+ */
+export async function connectGitHubUserPush(
+  userId: string,
+  code: string,
+  deps: GitHubUserPushConnectionDeps & { exchangeCode?: typeof exchangeGitHubPushCode; fetchProfile?: typeof fetchGitHubPushProfile },
+  signal?: AbortSignal,
+): Promise<void> {
+  const exchangeCode = deps.exchangeCode ?? exchangeGitHubPushCode;
+  const fetchProfile = deps.fetchProfile ?? fetchGitHubPushProfile;
+
+  const tokens = await exchangeCode(code, signal);
+  const profile = await fetchProfile(tokens.accessToken, signal);
+
+  await deps.connectionRepo.upsertGitHubUserPushConnection({
+    id: randomUUID(),
+    userId,
+    externalAccountLogin: profile.login,
+    encryptedAccessToken: encryptCredential(tokens.accessToken),
+  });
+}
+
+/**
+ * Resolves THIS user's own GitHub direct-push token (never another user's,
+ * never the App's) — the credential resolvePrStrategy falls back to once the
+ * App path is unavailable for a repo. Returns undefined (not an error) when
+ * the user has never connected, so callers can distinguish "no connection at
+ * all" from a real request failure and fall through to ADMIN_APPROVAL_REQUIRED.
+ */
+export async function resolveGitHubUserPushToken(
+  userId: string,
+  deps: GitHubUserPushConnectionDeps,
+): Promise<string | undefined> {
+  if (!isGitHubPushOAuthConfigured()) return undefined;
+  const connection = await deps.connectionRepo.findActiveGitHubUserPushConnectionForUser(userId);
+  if (!connection?.encryptedAccessToken) return undefined;
+  return decryptCredential(connection.encryptedAccessToken);
 }
 
 /**

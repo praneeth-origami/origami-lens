@@ -13,6 +13,8 @@ import {
   TagIcon,
   ShieldIcon,
   ChevronDownIcon,
+  MonitorIcon,
+  CrownIcon,
 } from './icons';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 
@@ -71,10 +73,12 @@ interface NavItem {
 const BASE_NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Dashboard', end: true, icon: HomeIcon },
   { to: '/scans', label: 'Scans', end: true, icon: ActivityIcon },
+  { to: '/monitoring', label: 'Monitoring', end: false, icon: MonitorIcon },
   { to: '/components', label: 'Components', end: false, icon: CubeIcon },
   { to: '/repositories', label: 'Repositories', end: false, icon: GitBranchIcon },
   { to: '/workspace/members', label: 'Workspace', end: false, icon: UsersIcon },
   { to: '/pricing', label: 'Pricing', end: false, icon: TagIcon },
+  { to: '/agency', label: 'Agency', end: false, icon: CrownIcon },
 ];
 
 const THEME_OPTIONS: ThemeMode[] = ['light', 'dark', 'system'];

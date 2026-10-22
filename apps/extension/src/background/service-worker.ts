@@ -16,30 +16,15 @@ import {
   registerComponentAlarmListener,
   startComponentGeneration,
 } from './component-coordinator.js';
-
-function pingTab(tabId: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, { type: 'PING' }, (response) => {
-      if (chrome.runtime.lastError) {
-        resolve(false);
-      } else {
-        resolve(Boolean(response?.pong));
-      }
-    });
-  });
-}
-
-async function ensureContentScript(tabId: number): Promise<void> {
-  const alive = await pingTab(tabId);
-  if (alive) return;
-
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ['content/content-script.js'],
-  });
-
-  await new Promise((r) => setTimeout(r, 100));
-}
+import { runElementAction } from './element-action-coordinator.js';
+import {
+  cancelResponsiveTest,
+  clearActiveResponsiveTest,
+  getResponsiveTestState,
+  runResponsiveTest,
+} from './responsive-test-coordinator.js';
+import { createBugReport } from './bug-report-coordinator.js';
+import { ensureContentScript } from './content-script-utils.js';
 
 function collectFromTab(tabId: number): Promise<unknown> {
   return new Promise((resolve) => {
@@ -195,6 +180,72 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
     clearActiveComponentJob()
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message.type === 'RUN_ELEMENT_ACTION') {
+    runElementAction(message.action, message.evidence, message.instruction)
+      .then((result) => sendResponse(result))
+      .catch((error) => {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Element action failed.' });
+      });
+    return true;
+  }
+
+  if (message.type === 'RUN_RESPONSIVE_TEST') {
+    runResponsiveTest(message.url)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Responsive test failed.' });
+      });
+    return true;
+  }
+
+  if (message.type === 'GET_RESPONSIVE_TEST_STATE') {
+    getResponsiveTestState()
+      .then((activeTest) => sendResponse({ activeTest }))
+      .catch(() => sendResponse({ activeTest: null }));
+    return true;
+  }
+
+  if (message.type === 'CANCEL_RESPONSIVE_TEST') {
+    cancelResponsiveTest()
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message.type === 'CLEAR_RESPONSIVE_TEST') {
+    clearActiveResponsiveTest()
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
+  if (message.type === 'SELECT_ELEMENT_BY_SELECTOR') {
+    const tabId = message.tabId;
+    (async () => {
+      try {
+        await ensureContentScript(tabId);
+        chrome.tabs.sendMessage(tabId, { type: 'SELECT_ELEMENT_BY_SELECTOR', selector: message.selector, autoAction: message.autoAction }, (response) => {
+          sendResponse(response ?? { success: false, error: 'No response from page.' });
+        });
+      } catch (error) {
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Could not select this element on the page.',
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message.type === 'CREATE_BUG_REPORT') {
+    createBugReport(message.tabId, message.form)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : 'Could not create the bug report.' });
+      });
     return true;
   }
 

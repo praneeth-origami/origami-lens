@@ -80,6 +80,22 @@ describe('parseAndExtract — TypeScript', () => {
     assert.equal(result!.hasSyntaxError, true);
     assert.ok(find(result!.symbols, 'ok'));
   });
+
+  it('reports a real line/column location for a syntax error, not just a boolean', async () => {
+    const result = await parseAndExtract('typescript', 'export function add(a: number, b: number): number {\n  return a + b;\n');
+    assert.ok(result);
+    assert.equal(result!.hasSyntaxError, true);
+    assert.ok(result!.syntaxErrorLocation);
+    assert.ok(result!.syntaxErrorLocation!.line >= 1);
+    assert.ok(result!.syntaxErrorLocation!.column >= 1);
+    assert.ok(result!.syntaxErrorLocation!.message.length > 0);
+  });
+
+  it('never reports a syntaxErrorLocation for syntactically valid source', async () => {
+    const result = await parseAndExtract('typescript', 'export function add(a: number, b: number): number {\n  return a + b;\n}\n');
+    assert.equal(result!.hasSyntaxError, false);
+    assert.equal(result!.syntaxErrorLocation, undefined);
+  });
 });
 
 describe('parseAndExtract — TSX', () => {
@@ -104,6 +120,21 @@ describe('parseAndExtract — TSX', () => {
     const btn = find(result!.symbols, 'Button');
     assert.equal(btn!.symbolType, 'component');
     assert.equal(btn!.isExported, true);
+  });
+
+  it('reports a real error location for an unclosed JSX element', async () => {
+    // Tree-sitter's grammar is a context-free parser, not a full compiler —
+    // it does not itself verify that a closing tag's NAME matches its
+    // opening tag (that's a semantic check, the kind a real TypeScript/
+    // Babel compiler performs, not something this Tree-sitter-based
+    // validator can replicate — see the module comment on never fabricating
+    // a compiler-style message the grammar didn't actually produce). What it
+    // DOES reliably flag is a genuinely unclosed element.
+    const result = await parseAndExtract('tsx', 'export function Layout({ children }: { children: React.ReactNode }) {\n  return <div>{children}\n}\n');
+    assert.ok(result);
+    assert.equal(result!.hasSyntaxError, true);
+    assert.ok(result!.syntaxErrorLocation);
+    assert.ok(result!.syntaxErrorLocation!.line >= 1);
   });
 });
 

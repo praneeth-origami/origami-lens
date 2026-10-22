@@ -41,7 +41,7 @@ function buildMiddleware() {
       },
       getCount: async () => count,
     },
-    organizationRepo: { countMembers: async () => 1 },
+    organizationRepo: { countMembers: async () => 1, countInternalMembers: async () => 1 },
   });
   return createUsageLimitMiddleware(service);
 }

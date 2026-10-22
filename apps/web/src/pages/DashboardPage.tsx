@@ -23,6 +23,10 @@ import { PagesTable, WebsiteScanPanel } from '../components/WebsiteScanPanel';
 import { RecentActivity } from '../components/RecentActivity';
 import { PersonaCta } from '../components/PersonaCta';
 import { Disclosure } from '../components/Disclosure';
+import { PageAskAi } from '../components/PageAskAi';
+import { ResponsiveTestPanel } from '../components/ResponsiveTestPanel';
+import { VisualComparisonPanel } from '../components/VisualComparisonPanel';
+import { TalkToOrigamiCta } from '../components/TalkToOrigamiCta';
 
 type ScanWithMeta = ScanResponse & { issuesByCategory?: Record<string, number> };
 
@@ -272,6 +276,15 @@ export function DashboardPage() {
             </section>
           )}
 
+          {/* "Ask About This Page" only applies to a CURRENT_PAGE scan — the
+              scan row itself is the one page's evidence. A WEBSITE scan's
+              top-level view is an aggregate across many pages with no single
+              page's evidence to ground an answer in; its per-page version
+              lives on PageScanDetailPage instead. */}
+          {scan.scanType !== 'WEBSITE' && <PageAskAi scanId={scan.scanId} />}
+          <ResponsiveTestPanel url={scan.url} />
+          {scan.scanType !== 'WEBSITE' && <VisualComparisonPanel url={scan.url} currentScanId={scan.scanId} />}
+
           {/* 4. Issues — the primary section */}
           <section id="issues-section" className="issues-section animate-in">
             <div className="page-heading-row">
@@ -285,6 +298,7 @@ export function DashboardPage() {
               </div>
             ) : (
               <>
+                <TalkToOrigamiCta scanId={scan.scanId} />
                 <IssueFiltersBar
                   severityTab={severityTab}
                   onSeverityTab={setSeverityTab}

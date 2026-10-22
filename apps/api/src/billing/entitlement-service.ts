@@ -21,6 +21,8 @@ export interface EntitlementUsageCounterRepo {
 
 export interface EntitlementOrganizationRepo {
   countMembers(organizationId: string): Promise<number>;
+  /** Internal (non-CLIENT_VIEWER) members only — see organization-repository.ts's own doc comment. A CLIENT_VIEWER was never functionally usable before the Agency plan (every permission check denied it), so this is a no-op for any plan's pre-existing usage and only changes behavior once CLIENT_VIEWER memberships actually exist. */
+  countInternalMembers(organizationId: string): Promise<number>;
   listMembers(organizationId: string): Promise<WorkspaceMember[]>;
 }
 
@@ -70,13 +72,30 @@ export class EntitlementService {
   async getEntitlements(organizationId: string): Promise<Entitlements> {
     const subscription = await this.deps.subscriptionRepo.getOrCreateForOrganization(organizationId);
     const definition = PLAN_DEFINITIONS[subscription.plan];
-    const seatsUsed = await this.deps.organizationRepo.countMembers(organizationId);
+    const seatsUsed = await this.deps.organizationRepo.countInternalMembers(organizationId);
     return {
       plan: subscription.plan,
       limits: definition.limits,
       seatsIncluded: subscription.seatCount,
       seatsUsed,
     };
+  }
+
+  /**
+   * Agency plan (V4) hard seat cap — distinct from Team's economic
+   * overage-billing model (updateSeats charges for extra seats instead of
+   * blocking them). `limits.internalSeatHardCap` is `null` for every plan
+   * except Agency, so this is always `{allowed: true}` for Free/Developer/
+   * Pro/Team — a pure no-op preserving their exact current behavior.
+   * Called BEFORE inviting/adding a non-CLIENT_VIEWER member; a
+   * CLIENT_VIEWER invite never consults this at all (see call sites).
+   */
+  async checkSeatCapacity(organizationId: string): Promise<{ allowed: boolean; limit: number | null; used: number }> {
+    const entitlements = await this.getEntitlements(organizationId);
+    const limit = entitlements.limits.internalSeatHardCap;
+    const used = await this.deps.organizationRepo.countInternalMembers(organizationId);
+    if (limit === null) return { allowed: true, limit: null, used };
+    return { allowed: used < limit, limit, used };
   }
 
   async getUsageToday(organizationId: string): Promise<UsageSnapshot[]> {
@@ -104,6 +123,34 @@ export class EntitlementService {
       await this.notifyLimitReachedBestEffort(organizationId, metric, usageDate, entitlements.plan);
     }
     return { allowed, limit, remaining: Math.max(0, limit - count), plan: entitlements.plan };
+  }
+
+  /**
+   * Continuous Monitoring (V3) capacity gate — deliberately NOT a
+   * checkAndConsumeQuota-style per-day metered counter (monitored sites
+   * aren't "consumed" daily, they're a persistent count), so this is a
+   * plain capacity comparison against PlanLimits.monitoredWebsitesIncluded
+   * instead of a usage_counters write. `currentEnabledCount` is supplied
+   * by the caller (MonitoredSiteRepository.countEnabledForOrganization) —
+   * this service never queries monitoring's own tables directly, keeping
+   * entitlement-service.ts feature-agnostic.
+   */
+  async canCreateMonitoredSite(organizationId: string, currentEnabledCount: number): Promise<{ allowed: boolean; limit: number | null; plan: SubscriptionPlan }> {
+    const entitlements = await this.getEntitlements(organizationId);
+    const limit = entitlements.limits.monitoredWebsitesIncluded;
+    if (limit === null) return { allowed: true, limit: null, plan: entitlements.plan };
+    return { allowed: currentEnabledCount < limit, limit, plan: entitlements.plan };
+  }
+
+  /** Agency plan (V4) — client-workspace management and white-label branding are both flagship Agency capabilities with no separate numeric limit specified by the product requirements (explicitly: do not invent commercial tiers beyond what's asked) — gated as a simple plan check, the same boolean-capability shape Continuous Monitoring's monitoredWebsitesIncluded uses when its limit is 0 vs non-zero. */
+  async canManageClientWorkspaces(organizationId: string): Promise<boolean> {
+    const entitlements = await this.getEntitlements(organizationId);
+    return entitlements.plan === 'AGENCY';
+  }
+
+  async canUseWhiteLabelBranding(organizationId: string): Promise<boolean> {
+    const entitlements = await this.getEntitlements(organizationId);
+    return entitlements.plan === 'AGENCY';
   }
 
   private async notifyLimitReachedBestEffort(organizationId: string, metric: UsageMetric, usageDate: string, plan: SubscriptionPlan): Promise<void> {

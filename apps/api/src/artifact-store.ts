@@ -39,6 +39,13 @@ export class ArtifactStore {
     return stored;
   }
 
+  /** Generic single-image save, reusing the exact same on-disk layout saveScreenshots already uses — `id` need not be a scan id (Create Bug Report uses it keyed by bugReportId). */
+  saveImage(id: string, key: string, base64: string): void {
+    const dir = path.join(this.artifactsRoot, id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, path.basename(key)), Buffer.from(base64, 'base64'));
+  }
+
   getArtifactPath(scanId: string, key: string): string | undefined {
     const safeKey = path.basename(key);
     const filePath = path.join(this.artifactsRoot, scanId, safeKey);

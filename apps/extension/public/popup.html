@@ -94,6 +94,51 @@
           </button>
         </div>
 
+        <p class="section-label">Analyze</p>
+        <div class="option-cards">
+          <button id="select-element-btn" type="button" class="option-card">
+            <span class="option-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <path d="M3 2.5 15 8l-5 1.5L8 15 3 2.5Z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="option-body">
+              <span class="option-title">Select Element</span>
+              <span class="option-desc">Click anything on the page to explain, fix, improve, or convert it.</span>
+            </span>
+            <span class="option-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="test-responsive-btn" type="button" class="option-card">
+            <span class="option-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <rect x="1.5" y="4" width="8" height="11" rx="1" stroke="currentColor" stroke-width="1.25"/>
+                <rect x="11" y="1.5" width="5.5" height="6.5" rx="1" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M4.5 12.5h2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span class="option-body">
+              <span class="option-title">Test Responsive</span>
+              <span class="option-desc">Check this page at 375, 390, 430, 768, 1024px and desktop.</span>
+            </span>
+            <span class="option-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="report-bug-btn" type="button" class="option-card">
+            <span class="option-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                <circle cx="9" cy="9.5" r="5" stroke="currentColor" stroke-width="1.25"/>
+                <path d="M9 2.5v2M4.5 4.5 6 6M13.5 4.5 12 6M3 9.5h1.5M13.5 9.5H15M6.5 12l-1 2M11.5 12l1 2" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span class="option-body">
+              <span class="option-title">Report a Bug</span>
+              <span class="option-desc">Capture URL, browser, screenshot, console &amp; network errors automatically.</span>
+            </span>
+            <span class="option-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+
         <div id="component-job-section" class="last-scan hidden">
           <p class="section-label">Component generation</p>
           <div class="last-scan-card">
@@ -325,6 +370,163 @@
         </div>
       </section>
 
+      <!-- RESPONSIVE TESTING: IN PROGRESS -->
+      <section id="view-responsive-progress" class="view hidden" aria-label="Testing responsive layouts">
+        <button type="button" id="responsive-progress-cancel-btn" class="back-link">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M8.5 3L4 7l4.5 4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Back
+        </button>
+        <p id="lens-banner-responsive-progress" class="lens-banner active">Lens Active: Testing responsive layouts…</p>
+        <div class="scan-header">
+          <div class="spinner" role="status" aria-label="Testing responsive layouts"></div>
+          <h2 class="page-title">Responsive Test</h2>
+          <p id="responsive-progress-url" class="scan-url truncate">—</p>
+        </div>
+        <ul id="responsive-progress-list" class="step-list" aria-live="polite"></ul>
+      </section>
+
+      <!-- RESPONSIVE TESTING: RESULTS -->
+      <section id="view-responsive-results" class="view hidden" aria-label="Responsive test results">
+        <button type="button" id="responsive-results-back-btn" class="back-link">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M8.5 3L4 7l4.5 4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Back
+        </button>
+        <p id="lens-banner-responsive-results" class="lens-banner event hidden"></p>
+        <h2 class="page-title">Responsive Test</h2>
+        <p id="responsive-results-url" class="scan-url truncate">—</p>
+        <p id="responsive-results-summary" class="results-meta"></p>
+        <ul id="responsive-viewport-list" class="page-progress-list responsive-viewport-list" aria-live="polite"></ul>
+        <div class="action-stack">
+          <button id="responsive-test-again-btn" type="button" class="btn btn-secondary">Test again</button>
+        </div>
+      </section>
+
+      <!-- RESPONSIVE TESTING: ISSUE DETAIL -->
+      <section id="view-responsive-issue-detail" class="view hidden" aria-label="Responsive issue details">
+        <button type="button" id="responsive-issue-back-btn" class="back-link">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M8.5 3L4 7l4.5 4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Back to results
+        </button>
+
+        <div class="issue-header">
+          <span id="responsive-issue-severity" class="severity-pill">—</span>
+          <span id="responsive-issue-viewport" class="category-pill">—</span>
+        </div>
+        <h2 id="responsive-issue-title" class="issue-title">—</h2>
+
+        <img id="responsive-issue-screenshot" class="responsive-issue-screenshot hidden" alt="Screenshot of the page at the affected viewport width" />
+
+        <div class="detail-stack">
+          <article class="detail-card">
+            <h3>Problem</h3>
+            <p id="responsive-issue-problem"></p>
+          </article>
+          <article class="detail-card">
+            <h3>Cause</h3>
+            <p id="responsive-issue-cause"></p>
+          </article>
+          <article class="detail-card">
+            <h3>Suggested fix</h3>
+            <p id="responsive-issue-fix"></p>
+          </article>
+          <article id="responsive-issue-selector-card" class="detail-card hidden">
+            <h3>Selector</h3>
+            <p id="responsive-issue-selector"></p>
+          </article>
+        </div>
+
+        <div class="button-row">
+          <button id="responsive-issue-explain-btn" type="button" class="btn btn-secondary btn-sm">Explain</button>
+          <button id="responsive-issue-select-btn" type="button" class="btn btn-secondary btn-sm">Select Element</button>
+          <button id="responsive-issue-fix-btn" type="button" class="btn btn-secondary btn-sm">Fix</button>
+        </div>
+        <p id="responsive-issue-status" class="ask-response" aria-live="polite"></p>
+        <p id="responsive-issue-explain-response" class="ask-response" aria-live="polite"></p>
+      </section>
+
+      <!-- REPORT A BUG: FORM -->
+      <section id="view-bug-report-form" class="view hidden" aria-label="Report a bug">
+        <button type="button" id="bug-report-back-btn" class="back-link">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <path d="M8.5 3L4 7l4.5 4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Back
+        </button>
+        <h2 class="page-title">Report a Bug</h2>
+        <p id="bug-report-url" class="scan-url truncate">—</p>
+        <p class="field-hint">URL, browser, OS, viewport, screenshot, console &amp; network errors are captured automatically.</p>
+
+        <form id="bug-report-form" class="form-stack" novalidate>
+          <div class="field">
+            <label class="field-label" for="bug-report-title">Title</label>
+            <input id="bug-report-title" type="text" class="field-input" placeholder="Checkout button throws an error" required />
+          </div>
+          <div class="field">
+            <label class="field-label" for="bug-report-description">What happened?</label>
+            <textarea id="bug-report-description" class="field-input field-textarea" rows="3" placeholder="Describe the problem" required></textarea>
+          </div>
+          <div class="field">
+            <label class="field-label" for="bug-report-severity">Severity</label>
+            <select id="bug-report-severity" class="field-input field-select">
+              <option value="CRITICAL">Critical</option>
+              <option value="HIGH" selected>High</option>
+              <option value="MEDIUM">Medium</option>
+              <option value="LOW">Low</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="bug-report-category">Category</label>
+            <select id="bug-report-category" class="field-input field-select">
+              <option value="functional" selected>Functional</option>
+              <option value="performance">Performance</option>
+              <option value="visualMobile">Visual / Mobile</option>
+              <option value="accessibility">Accessibility</option>
+              <option value="bestPractices">Best Practices</option>
+              <option value="seo">SEO</option>
+              <option value="securityHygiene">Security</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="bug-report-steps">Reproduction steps (one per line)</label>
+            <textarea id="bug-report-steps" class="field-input field-textarea" rows="3" placeholder="Open /checkout&#10;Add an item to cart&#10;Click Checkout"></textarea>
+            <span class="field-hint">Optional — only what you actually did is included, nothing is invented.</span>
+          </div>
+          <div class="field">
+            <label class="field-label" for="bug-report-expected">Expected behavior (optional)</label>
+            <input id="bug-report-expected" type="text" class="field-input" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="bug-report-actual">Actual behavior (optional)</label>
+            <input id="bug-report-actual" type="text" class="field-input" />
+          </div>
+
+          <p id="bug-report-form-error" class="connect-repo-error hidden" role="alert"></p>
+          <button id="bug-report-submit-btn" type="submit" class="btn btn-primary">Create Bug Report</button>
+        </form>
+      </section>
+
+      <!-- REPORT A BUG: RESULT -->
+      <section id="view-bug-report-result" class="view hidden" aria-label="Bug report created">
+        <div class="complete-badge" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <circle cx="10" cy="10" r="9" stroke="currentColor" stroke-width="1.25"/>
+            <path d="M6 10l2.5 2.5L14 7" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2 class="page-title">Bug Report Created</h2>
+        <p class="page-subtitle">Lens Event: Bug report created successfully.</p>
+        <div class="action-stack">
+          <a id="bug-report-view-link" class="btn btn-primary" href="#" target="_blank" rel="noreferrer">View Bug Report</a>
+          <button id="bug-report-done-btn" type="button" class="btn btn-secondary">Done</button>
+        </div>
+      </section>
+
       <!-- ERROR -->
       <section id="view-error" class="view hidden" aria-label="Error">
         <div class="error-icon" aria-hidden="true">
@@ -337,8 +539,77 @@
         <p id="error-message" class="error-body">Origami Lens couldn't complete this scan.</p>
         <p id="error-detail" class="error-detail hidden"></p>
         <div class="action-stack">
+          <a id="view-plans-btn" class="btn btn-primary hidden" target="_blank" rel="noreferrer">View Plans</a>
           <button id="retry-btn" type="button" class="btn btn-primary">Try again</button>
           <button id="error-back-btn" type="button" class="btn btn-secondary">Back</button>
+        </div>
+      </section>
+
+      <!-- AUTH REQUIRED — a real permission state, not a failure; kept as
+           its own view (not the generic error view above) so it can use a
+           calmer, richer layout without conditionally rebuilding the error
+           view's DOM. -->
+      <section id="view-auth-required" class="view hidden" aria-label="Sign in required">
+        <div class="auth-hero" aria-hidden="true">
+          <div class="auth-hero-glow"></div>
+          <div class="auth-hero-icon">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+              <rect x="5" y="10.5" width="14" height="9.5" rx="2.5" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              <circle cx="12" cy="14.75" r="1.4" fill="currentColor"/>
+              <path d="M12 16.15V17.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+
+        <h1 class="page-title">Sign in required</h1>
+        <p class="page-subtitle">Sign in to Origami Lens to run a scan and unlock powerful website insights.</p>
+
+        <ul class="auth-benefits">
+          <li class="auth-benefit">
+            <span class="auth-benefit-icon scan" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                <path d="M4 20V13M12 20V6M20 20v-9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </span>
+            <span class="auth-benefit-copy">
+              <span class="auth-benefit-title">Run website scans</span>
+              <span class="auth-benefit-desc">Find issues and get AI-powered insights</span>
+            </span>
+          </li>
+          <li class="auth-benefit">
+            <span class="auth-benefit-icon secure" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                <path d="M12 3.5 19 6.5V11c0 4.7-3.3 7.7-7 9-3.7-1.3-7-4.3-7-9V6.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="m9 11.8 2 2 4-4.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="auth-benefit-copy">
+              <span class="auth-benefit-title">Secure by design</span>
+              <span class="auth-benefit-desc">Your connected data stays protected</span>
+            </span>
+          </li>
+          <li class="auth-benefit">
+            <span class="auth-benefit-icon unlock" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+                <path d="M13 3 4.5 13.5H11L10 21l8.5-10.5H12l1-7.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="auth-benefit-copy">
+              <span class="auth-benefit-title">Unlock powerful tools</span>
+              <span class="auth-benefit-desc">Health scores, AI analysis, and fixes</span>
+            </span>
+          </li>
+        </ul>
+
+        <div class="action-stack">
+          <a id="auth-sign-in-btn" class="btn btn-primary btn-auth-signin" target="_blank" rel="noreferrer">
+            Sign In
+            <svg class="btn-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </a>
+          <button id="auth-back-btn" type="button" class="btn btn-secondary">Back</button>
         </div>
       </section>
     </main>

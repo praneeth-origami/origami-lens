@@ -1,4 +1,4 @@
-import type { RepositoryFixPrProvider } from '@origami/contracts';
+import type { RepositoryFixPrProvider, RepositoryFixPrStrategy } from '@origami/contracts';
 
 /**
  * Provider-agnostic abstraction for the one remote-hosting operation Phase
@@ -17,6 +17,24 @@ export interface CreatePullRequestParams {
   body: string;
   head: string;
   base: string;
+  /**
+   * Set only for a fork-based PR (USER_FORK strategy) — the fork's owner
+   * login. When present and different from `owner`, GitHubProviderClient
+   * formats `head` as `"headOwner:head"` (GitHub's real cross-repo PR
+   * contract); every other provider/call site ignores this field. `owner`/
+   * `repo` always stay the ORIGINAL (base) repository — GitHub's PR API is
+   * always called against the base repo, never the fork.
+   */
+  headOwner?: string;
+  /**
+   * Overrides the provider client's normal credential resolution (the App
+   * installation path) with an already-resolved token — used for
+   * USER_DIRECT/USER_FORK, where the caller (resolvePrStrategy) already
+   * holds the user's own GitHub token and re-deriving an App token would be
+   * wrong (the App may not even be installed on this repo). Ignored by
+   * providers that only have one credential path.
+   */
+  authToken?: string;
 }
 
 export interface PullRequestInfo {
@@ -28,6 +46,20 @@ export interface PullRequestInfo {
 
 export interface RepositoryInfo {
   defaultBranch: string;
+}
+
+/** Create GitHub Issue (roadmap Phase 7) — a plain issue, never a branch/commit/PR. */
+export interface CreateGitHubIssueParams {
+  owner: string;
+  repo: string;
+  title: string;
+  body: string;
+  labels?: string[];
+}
+
+export interface GitHubIssueInfo {
+  number: number;
+  url: string;
 }
 
 /**
@@ -44,10 +76,34 @@ export interface PushCredentials {
   token: string;
 }
 
+/**
+ * The result of resolving HOW a PR will be created for a given
+ * repository+user (see repository-github-provider-client.ts's
+ * resolvePrStrategy) — used both for a real approval (pushCredentials
+ * present, ready to use) and for a read-only UI preview (pushCredentials
+ * omitted; `preview: true` was passed so no fork was actually created).
+ * `strategy: 'ADMIN_APPROVAL_REQUIRED'` is a normal, expected outcome here,
+ * not a thrown error — the caller (repository-fix-workflow-service.ts)
+ * turns it into a FixWorkflowError only at actual-approval time.
+ */
+export interface PrStrategyResult {
+  strategy: RepositoryFixPrStrategy | 'ADMIN_APPROVAL_REQUIRED';
+  /** Human-readable explanation, safe to show directly in the UI — never includes a token or other secret. */
+  detail: string;
+  pushCredentials?: PushCredentials;
+  /** USER_FORK only — the fork's owner login, used to format `CreatePullRequestParams.headOwner`. */
+  forkOwner?: string;
+  /** USER_FORK only — the fork's HTTPS clone URL, used as the git remote the branch is actually pushed to (never `origin`, which still points at the original repo). */
+  forkCloneUrl?: string;
+  /** Present for USER_DIRECT/USER_FORK (resolution already fetched the repo) — GITHUB_APP_DIRECT leaves this undefined so the workflow service's existing default-branch fallback chain runs unchanged. */
+  defaultBranch?: string;
+}
+
 export class RepositoryProviderError extends Error {
   constructor(
     message: string,
-    public readonly category: 'AUTH_NOT_CONFIGURED' | 'AUTH_FAILED' | 'NOT_FOUND' | 'RATE_LIMITED' | 'PROVIDER_UNSUPPORTED' | 'REQUEST_FAILED',
+    /** FORK_NOT_READY — GitHub accepted a fork request (or one already existed) but it hadn't finished provisioning within the bounded poll window; see GitHubProviderClient.resolvePrStrategy. Safe to retry. */
+    public readonly category: 'AUTH_NOT_CONFIGURED' | 'AUTH_FAILED' | 'NOT_FOUND' | 'RATE_LIMITED' | 'PROVIDER_UNSUPPORTED' | 'REQUEST_FAILED' | 'FORK_NOT_READY',
   ) {
     super(message);
     this.name = 'RepositoryProviderError';
@@ -85,4 +141,27 @@ export interface RepositoryProviderClient {
    * branch is created (see the Phase 13 report's mutation-order section).
    */
   getPushCredentials(userId: string, owner: string, repo: string, signal?: AbortSignal): Promise<PushCredentials>;
+
+  /**
+   * OPTIONAL — only GitHubProviderClient implements this. Resolves which of
+   * GITHUB_APP_DIRECT/USER_DIRECT/USER_FORK/ADMIN_APPROVAL_REQUIRED applies
+   * for this specific user+repository, trying the existing App path
+   * (getPushCredentials, unchanged) first and falling back to the user's
+   * own direct-push OAuth connection only when the App can't reach this
+   * repo. GitLab/Bitbucket have no such fork here, so this stays undefined
+   * for them and every existing caller of getPushCredentials is unaffected.
+   * `preview: true` performs every read-only check but never creates a
+   * fork — for the UI's "which method will be used" preview.
+   */
+  resolvePrStrategy?(userId: string, owner: string, repo: string, signal?: AbortSignal, opts?: { preview?: boolean }): Promise<PrStrategyResult>;
+
+  /**
+   * OPTIONAL — only GitHubProviderClient implements this today (roadmap
+   * Phase 7). Creates a plain GitHub issue, never a branch/commit/PR.
+   * Resolves credentials through the exact same per-user App-installation
+   * path createPullRequest already uses (githubRequest's resolveGitHubToken)
+   * — never a second, parallel auth mechanism. GitLab/Bitbucket have no
+   * implementation here yet, so this stays undefined for them.
+   */
+  createIssue?(userId: string, params: CreateGitHubIssueParams, signal?: AbortSignal): Promise<GitHubIssueInfo>;
 }

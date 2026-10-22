@@ -290,6 +290,47 @@ describe('proposeFindingFix (orchestration)', () => {
     );
   });
 
+  it('an ungrounded proposal is rejected with PROPOSAL_UNGROUNDED and a safe diagnostic, at the orchestration level too', async () => {
+    const stores = fakeStores();
+    const fix = new FakeFixProvider();
+    fix.response = {
+      model: 'm', status: 'PROPOSED', summary: 'S', reasoning: 'R',
+      changes: [{ filePath: 'apps/web/src/styles/dashboard.css', language: 'css', hunks: [{ startLine: 120, endLine: 120, oldText: 'this text was never in the real file', newText: 'y' }] }],
+    };
+    await assert.rejects(
+      () => proposeFindingFix({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, SAMPLE_ISSUE, stores, { repositoryId: 'repo-1', ownerId: 'owner-a' }, fakeDeps({ fix })),
+      (e: unknown) => {
+        assert.ok(e instanceof FindingFixError);
+        assert.equal(e.code, 'PROPOSAL_UNGROUNDED');
+        assert.ok(e.diagnostic);
+        assert.equal((e.diagnostic as { commitSha?: string }).commitSha, COMMIT_SHA);
+        return true;
+      },
+    );
+  });
+
+  it('SOURCE_REVISION_MISMATCH — a retrieved chunk/file whose own commitSha disagrees with the resolved commit is rejected BEFORE the LLM is ever called', async () => {
+    const candidates = [makeCandidate()];
+    const files = candidates.map(toIndexedFile).map((f) => ({ ...f, commitSha: 'b'.repeat(40) }));
+    const chunks = candidates.map(toChunk);
+    const stores = fakeStores({ candidates, files, chunks });
+    const fix = new FakeFixProvider();
+    await assert.rejects(
+      () => proposeFindingFix({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, SAMPLE_ISSUE, stores, { repositoryId: 'repo-1', ownerId: 'owner-a' }, fakeDeps({ fix })),
+      (e: unknown) => {
+        assert.ok(e instanceof FindingFixError);
+        assert.equal(e.code, 'SOURCE_REVISION_MISMATCH');
+        assert.ok(e.diagnostic);
+        const diagnostic = e.diagnostic as { expectedCommitSha?: string; indexedCommitSha?: string; repositoryId?: string };
+        assert.equal(diagnostic.expectedCommitSha, COMMIT_SHA);
+        assert.equal(diagnostic.indexedCommitSha, 'b'.repeat(40));
+        assert.equal(diagnostic.repositoryId, 'repo-1');
+        return true;
+      },
+    );
+    assert.equal(fix.calls.length, 0, 'the LLM must never be called once a revision mismatch is detected');
+  });
+
   it('TEST 26 — an already-cancelled signal propagates as a failure, never a silent success', async () => {
     const stores = fakeStores();
     const embedding = new FakeEmbeddingProvider();
@@ -300,6 +341,38 @@ describe('proposeFindingFix (orchestration)', () => {
       () => proposeFindingFix({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, SAMPLE_ISSUE, stores, { repositoryId: 'repo-1', ownerId: 'owner-a' }, fakeDeps({ embedding }), controller.signal),
       (e: unknown) => e instanceof FindingFixError,
     );
+  });
+
+  it('TEST 8 (source-grounding) — a proposal whose changed file actually contains the DOM evidence is HIGH confidence', async () => {
+    const stores = fakeStores(); // default candidate content: '.health-banner-warning { background: #ffffff; }' — matches SAMPLE_ISSUE's selector
+    const response = await proposeFindingFix({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, SAMPLE_ISSUE, stores, { repositoryId: 'repo-1', ownerId: 'owner-a' }, fakeDeps());
+    assert.equal(response.sourceGrounding?.confidence, 'HIGH');
+    assert.ok(response.sourceGrounding?.matchedEvidence.includes('health-banner-warning'));
+  });
+
+  it('TEST 9 (source-grounding) — a proposal that changes a file with no evidence overlap, while a DIFFERENT retrieved file matches the evidence, is downgraded rather than shown as confident', async () => {
+    const candidates = [
+      makeCandidate({ symbol: '.other', filePath: 'apps/web/src/styles/other.css', content: 'body { margin: 0; }' }),
+      makeCandidate({ symbol: '.health-banner-warning', filePath: 'apps/web/src/styles/dashboard.css', content: '.health-banner-warning { background: #ffffff; }' }),
+    ];
+    const stores = fakeStores({ candidates });
+    const fix = new FakeFixProvider();
+    fix.response = {
+      model: 'm', status: 'PROPOSED', summary: 'S', reasoning: 'R',
+      changes: [{ filePath: 'apps/web/src/styles/other.css', language: 'css', hunks: [{ startLine: 1, endLine: 1, oldText: 'margin: 0;', newText: 'margin: 1px;' }] }],
+    };
+    const response = await proposeFindingFix({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, SAMPLE_ISSUE, stores, { repositoryId: 'repo-1', ownerId: 'owner-a' }, fakeDeps({ fix }));
+    assert.equal(response.status, 'PROPOSED'); // still a valid, grounded (oldText-matches-file), reviewable proposal — never blocked
+    assert.equal(response.sourceGrounding?.confidence, 'LOW');
+    assert.match(response.sourceGrounding?.note ?? '', /wrong file/);
+  });
+
+  it('TEST 10 (source-grounding) — no sourceGrounding is attached when the model itself reports INSUFFICIENT_EVIDENCE', async () => {
+    const stores = fakeStores();
+    const fix = new FakeFixProvider();
+    fix.response = { model: 'm', status: 'INSUFFICIENT_EVIDENCE', summary: 'No confident mapping to code.', reasoning: 'Evidence is too generic.', changes: [] };
+    const response = await proposeFindingFix({ id: 'repo-1', userId: 'owner-a', organizationId: 'owner-a', status: 'EMBEDDINGS_READY' }, SAMPLE_ISSUE, stores, { repositoryId: 'repo-1', ownerId: 'owner-a' }, fakeDeps({ fix }));
+    assert.equal(response.sourceGrounding, undefined);
   });
 
   it('TEST 27 — an LLM timeout is classified as LLM_TIMEOUT, not a generic failure', async () => {
@@ -415,6 +488,41 @@ describe('validateFindingFixProposal', () => {
     const result = validateFindingFixProposal([validChange({ hunks: [{ startLine: 121, endLine: 121, oldText: 'this text was never in the real file', newText: 'y' }] })], [INDEXED_FILE], [INDEXED_CHUNK]);
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.error, /does not match the indexed content/);
+  });
+
+  it('an ungrounded rejection carries a PROPOSAL_UNGROUNDED code and a safe (hash-only) diagnostic — never the raw oldText/indexed content', () => {
+    const result = validateFindingFixProposal(
+      [validChange({ hunks: [{ startLine: 121, endLine: 121, oldText: 'this text was never in the real file', newText: 'y' }] })],
+      [INDEXED_FILE], [INDEXED_CHUNK], COMMIT_SHA,
+    );
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.code, 'PROPOSAL_UNGROUNDED');
+    assert.ok(result.diagnostic);
+    assert.equal(result.diagnostic!.filePath, 'apps/web/src/styles/dashboard.css');
+    assert.equal(result.diagnostic!.commitSha, COMMIT_SHA);
+    assert.equal(result.diagnostic!.hunkIndex, 0);
+    assert.equal(result.diagnostic!.reportedStartLine, 121);
+    assert.equal(result.diagnostic!.reportedEndLine, 121);
+    // The diagnostic is hashes only — the raw offending text must never appear in it.
+    assert.ok(!JSON.stringify(result.diagnostic).includes('this text was never in the real file'));
+    assert.match(result.diagnostic!.oldTextHash, /^[0-9a-f]{64}$/);
+    assert.match(result.diagnostic!.indexedContentHash, /^[0-9a-f]{64}$/);
+  });
+
+  it('the diagnostic hunkIndex reflects which hunk (0-based) actually failed grounding, not always 0', () => {
+    const result = validateFindingFixProposal(
+      [validChange({
+        hunks: [
+          { startLine: 121, endLine: 121, oldText: 'background: #ffffff;', newText: 'background: #1f2937;' },
+          { startLine: 122, endLine: 122, oldText: 'this text was never in the real file', newText: 'y' },
+        ],
+      })],
+      [INDEXED_FILE], [INDEXED_CHUNK], COMMIT_SHA,
+    );
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.diagnostic!.hunkIndex, 1);
   });
 
   it('Test A — a CRLF-indexed chunk grounds an otherwise-identical LF-authored oldText (line-ending-insensitive grounding)', () => {

@@ -184,4 +184,69 @@ describe('sanitizeHostnameForFilename / reportFilename', () => {
     assert.equal(reportFilename('https://example.com', 'report', 'pdf'), 'origami-lens-example-com-report.pdf');
     assert.equal(reportFilename('https://example.com', 'issues', 'csv'), 'origami-lens-example-com-issues.csv');
   });
+
+  it('Agency white-label (V4): a brandSlug replaces "origami-lens" in the filename', () => {
+    assert.equal(reportFilename('https://example.com', 'report', 'pdf', 'Acme Agency'), 'acme-agency-example-com-report.pdf');
+  });
+});
+
+describe('Agency white-label branding (V4)', () => {
+  it('buildLensReport attaches branding when supplied, and omits it entirely when not (never a default Origami Lens brand object)', () => {
+    const scan = fakeScan();
+    const unbranded = buildLensReport(scan);
+    assert.equal(unbranded.branding, undefined);
+
+    const branding = { displayName: 'Acme Agency', logoUrl: '/agency/branding/org-1/logo', primaryColor: '#123456' };
+    const brandedReport = buildLensReport(scan, branding);
+    assert.deepEqual(brandedReport.branding, branding);
+  });
+
+  it('renderReportMarkdown uses the branding display name in its title, falling back to "Origami Lens"', () => {
+    const scan = fakeScan();
+    const unbranded = renderReportMarkdown(buildLensReport(scan));
+    assert.match(unbranded, /^# Origami Lens Report/);
+
+    const branded = renderReportMarkdown(buildLensReport(scan, { displayName: 'Acme Agency' }));
+    assert.match(branded, /^# Acme Agency Report/);
+  });
+});
+
+describe('buildLensReport — 3-tier summary + screenshots (roadmap Phase 6)', () => {
+  it('derives important === high and improvements === medium + low, never a second independently-computed count', () => {
+    const scan = fakeScan({ summary: { totalIssues: 10, critical: 2, high: 3, medium: 4, low: 1, aiAvailable: true } });
+    const report = buildLensReport(scan);
+    assert.equal(report.summary.critical, 2);
+    assert.equal(report.summary.important, 3);
+    assert.equal(report.summary.improvements, 5);
+    // The original 4-tier fields must still be present for existing CSV/Markdown/developer-view consumers.
+    assert.equal(report.summary.high, 3);
+    assert.equal(report.summary.medium, 4);
+    assert.equal(report.summary.low, 1);
+  });
+
+  it('references the existing artifact-serving route for screenshots — never a duplicated screenshot store', () => {
+    const scan = fakeScan({
+      artifacts: { screenshots: [
+        { viewport: 'desktop', storageKey: 'desktop.jpg', width: 1280, height: 720 },
+        { viewport: 'mobile', storageKey: 'mobile.jpg', width: 390, height: 844 },
+      ] },
+    });
+    const report = buildLensReport(scan);
+    assert.equal(report.screenshots?.desktop, '/scans/scan-1/artifacts/desktop.jpg');
+    assert.equal(report.screenshots?.mobile, '/scans/scan-1/artifacts/mobile.jpg');
+  });
+
+  it('omits screenshots entirely when the scan captured none', () => {
+    const report = buildLensReport(fakeScan({ artifacts: undefined }));
+    assert.equal(report.screenshots, undefined);
+  });
+
+  it('never populates screenshots for a scan that has not completed successfully', () => {
+    const scan = fakeScan({
+      status: 'RUNNING',
+      artifacts: { screenshots: [{ viewport: 'desktop', storageKey: 'desktop.jpg', width: 1280, height: 720 }] },
+    });
+    const report = buildLensReport(scan);
+    assert.equal(report.screenshots, undefined);
+  });
 });

@@ -51,6 +51,21 @@ describe('buildFindingSearchQuery', () => {
     const query = buildFindingSearchQuery({ title: 'T', category: 'seo' });
     assert.ok(!query.includes('undefined'));
   });
+
+  it('enriches the query with DOM evidence tokens nested in items[] — the only place axe-core violation evidence lives', () => {
+    const query = buildFindingSearchQuery({
+      title: 'Elements must meet minimum color contrast ratio thresholds', category: 'accessibility',
+      evidence: { message: 'Contrast ratio 2.1:1', items: [{ selector: 'button.theme-option.active', snippet: '<button class="theme-option active">Dark</button>' }] },
+    });
+    assert.match(query, /theme-option/);
+    assert.match(query, /active/);
+  });
+
+  it('stays bounded even with several items[] entries', () => {
+    const items = Array.from({ length: 3 }, (_, i) => ({ selector: `#item-${i}-very-long-identifier-name`, snippet: `<div id="item-${i}-very-long-identifier-name">${'x'.repeat(50)}</div>` }));
+    const query = buildFindingSearchQuery({ title: 'T', category: 'accessibility', evidence: { items } });
+    assert.ok(query.length <= 300);
+  });
 });
 
 describe('summarizeFindingEvidence', () => {
@@ -67,6 +82,15 @@ describe('summarizeFindingEvidence', () => {
   it('scrubs an accidentally-captured secret out of evidence text', () => {
     const text = summarizeFindingEvidence({ message: 'token=Bearer sk-abcdefghijklmnopqrstuvwxyz123456 leaked' });
     assert.ok(!text.includes('sk-abcdefghijklmnopqrstuvwxyz123456'));
+  });
+
+  it('includes nested items[] (axe-core node selector/html) so the LLM actually sees the flagged element', () => {
+    const text = summarizeFindingEvidence({
+      message: 'Contrast ratio too low', count: 1,
+      items: [{ selector: 'button.theme-option.active', snippet: '<button class="theme-option active">Dark</button>' }],
+    });
+    assert.match(text, /button\.theme-option\.active/);
+    assert.match(text, /<button class="theme-option active">Dark<\/button>/);
   });
 });
 

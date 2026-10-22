@@ -40,6 +40,11 @@ interface FakeRow {
   scanId: string;
   tokenHash: string;
   revokedAt?: string;
+  expiresAt?: string;
+}
+
+function isExpired(row: FakeRow): boolean {
+  return !!row.expiresAt && new Date(row.expiresAt).getTime() <= Date.now();
 }
 
 function buildFakeRepo() {
@@ -47,19 +52,19 @@ function buildFakeRepo() {
   const createCalls: unknown[] = [];
 
   const shareLinkRepo = {
-    create: async (input: { id: string; scanId: string; tokenHash: string; createdBy?: string }) => {
+    create: async (input: { id: string; scanId: string; tokenHash: string; createdBy?: string; expiresAt?: string }) => {
       createCalls.push(input);
-      rows.set(input.id, { id: input.id, scanId: input.scanId, tokenHash: input.tokenHash });
+      rows.set(input.id, { id: input.id, scanId: input.scanId, tokenHash: input.tokenHash, expiresAt: input.expiresAt });
     },
     findActiveByScanId: async (scanId: string) => {
       for (const row of rows.values()) {
-        if (row.scanId === scanId && !row.revokedAt) return { id: row.id };
+        if (row.scanId === scanId && !row.revokedAt && !isExpired(row)) return { id: row.id, expiresAt: row.expiresAt };
       }
       return undefined;
     },
     findValidByTokenHash: async (tokenHash: string) => {
       for (const row of rows.values()) {
-        if (row.tokenHash === tokenHash && !row.revokedAt) return { scanId: row.scanId };
+        if (row.tokenHash === tokenHash && !row.revokedAt && !isExpired(row)) return { scanId: row.scanId };
       }
       return undefined;
     },
@@ -149,9 +154,9 @@ describe('getReportShareStatus', () => {
     const scanStore = buildFakeScanStore({ 'scan-1': fakeScan() }, { 'scan-1': ['org-1'] });
     const deps = { shareLinkRepo, scanStore, webAppBaseUrl: 'http://localhost:5173' };
 
-    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: false });
+    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: false, expiresAt: undefined });
     await createOrRotateReportShare(deps, 'scan-1', ['org-1'], 'user-1');
-    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: true });
+    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: true, expiresAt: undefined });
   });
 
   it('rejects for an unauthorized organization', async () => {
@@ -173,7 +178,7 @@ describe('revokeReportShare', () => {
 
     await revokeReportShare(deps, 'scan-1', ['org-1']);
 
-    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: false });
+    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: false, expiresAt: undefined });
     await assert.rejects(
       () => getSharedReportByToken(deps, token),
       (error: unknown) => error instanceof ReportShareError && error.code === 'REPORT_SHARE_NOT_FOUND',
@@ -209,5 +214,70 @@ describe('getSharedReportByToken', () => {
       () => getSharedReportByToken({ shareLinkRepo, scanStore }, 'not-a-real-token'),
       (error: unknown) => error instanceof ReportShareError && error.code === 'REPORT_SHARE_NOT_FOUND',
     );
+  });
+
+  it('Agency white-label (V4): resolves branding via the injected resolveBranding function and attaches it to the report', async () => {
+    const { shareLinkRepo } = buildFakeRepo();
+    const scanStore = buildFakeScanStore({ 'scan-1': fakeScan() }, { 'scan-1': ['org-1'] });
+    const deps = { shareLinkRepo, scanStore, webAppBaseUrl: 'http://localhost:5173' };
+    const { token } = await createOrRotateReportShare(deps, 'scan-1', ['org-1'], 'user-1');
+
+    let resolvedWithOrgId: string | undefined;
+    const report = await getSharedReportByToken(
+      { shareLinkRepo, scanStore, resolveBranding: async (orgId) => { resolvedWithOrgId = orgId; return { displayName: 'Acme Agency' }; } },
+      token,
+    );
+    assert.equal(resolvedWithOrgId, 'org-1');
+    assert.deepEqual(report.branding, { displayName: 'Acme Agency' });
+  });
+
+  it('omits branding entirely when resolveBranding is not provided (every pre-existing caller)', async () => {
+    const { shareLinkRepo } = buildFakeRepo();
+    const scanStore = buildFakeScanStore({ 'scan-1': fakeScan() }, { 'scan-1': ['org-1'] });
+    const deps = { shareLinkRepo, scanStore, webAppBaseUrl: 'http://localhost:5173' };
+    const { token } = await createOrRotateReportShare(deps, 'scan-1', ['org-1'], 'user-1');
+
+    const report = await getSharedReportByToken({ shareLinkRepo, scanStore }, token);
+    assert.equal(report.branding, undefined);
+  });
+});
+
+describe('Agency client share link expiration (V4)', () => {
+  it('createOrRotateReportShare with no expiresInDays creates a link that never expires (existing behavior unchanged)', async () => {
+    const { shareLinkRepo, createCalls } = buildFakeRepo();
+    const scanStore = buildFakeScanStore({ 'scan-1': fakeScan() }, { 'scan-1': ['org-1'] });
+    const deps = { shareLinkRepo, scanStore, webAppBaseUrl: 'http://localhost:5173' };
+
+    const result = await createOrRotateReportShare(deps, 'scan-1', ['org-1'], 'user-1');
+    assert.equal(result.expiresAt, undefined);
+    assert.equal((createCalls[0] as { expiresAt?: string }).expiresAt, undefined);
+  });
+
+  it('createOrRotateReportShare with expiresInDays sets a real future expiresAt', async () => {
+    const { shareLinkRepo } = buildFakeRepo();
+    const scanStore = buildFakeScanStore({ 'scan-1': fakeScan() }, { 'scan-1': ['org-1'] });
+    const deps = { shareLinkRepo, scanStore, webAppBaseUrl: 'http://localhost:5173' };
+
+    const before = Date.now();
+    const result = await createOrRotateReportShare(deps, 'scan-1', ['org-1'], 'user-1', 7);
+    assert.ok(result.expiresAt);
+    const expiresMs = new Date(result.expiresAt!).getTime();
+    assert.ok(expiresMs > before + 6 * 24 * 60 * 60 * 1000 && expiresMs <= before + 7 * 24 * 60 * 60 * 1000 + 1000);
+  });
+
+  it('an EXPIRED link is rejected exactly like a revoked one — REPORT_SHARE_NOT_FOUND, never a stale report', async () => {
+    const { shareLinkRepo, rows } = buildFakeRepo();
+    const scanStore = buildFakeScanStore({ 'scan-1': fakeScan() }, { 'scan-1': ['org-1'] });
+    const deps = { shareLinkRepo, scanStore, webAppBaseUrl: 'http://localhost:5173' };
+    const { token } = await createOrRotateReportShare(deps, 'scan-1', ['org-1'], 'user-1', 7);
+
+    // Simulate time passing past the expiration, directly on the fake row (no real clock mocking needed).
+    for (const row of rows.values()) row.expiresAt = new Date(Date.now() - 1000).toISOString();
+
+    await assert.rejects(
+      () => getSharedReportByToken({ shareLinkRepo, scanStore }, token),
+      (error: unknown) => error instanceof ReportShareError && error.code === 'REPORT_SHARE_NOT_FOUND',
+    );
+    assert.deepEqual(await getReportShareStatus(deps, 'scan-1', ['org-1']), { active: false, expiresAt: undefined });
   });
 });

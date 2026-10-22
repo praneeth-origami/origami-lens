@@ -7,9 +7,11 @@ import { GitLabOAuthError } from './gitlab-oauth.js';
 import { BitbucketOAuthError } from './bitbucket-oauth.js';
 import {
   connectGitHubInstallation,
+  connectGitHubUserPush,
   connectGitLabAccount,
   connectBitbucketAccount,
   resolveGitHubPushCredentials,
+  resolveGitHubUserPushToken,
   resolveGitLabAccessToken,
   resolveBitbucketAccessToken,
 } from './provider-connection-service.js';
@@ -20,6 +22,9 @@ const originalFetch = globalThis.fetch;
 const originalEnv = {
   GITHUB_APP_ID: process.env.GITHUB_APP_ID,
   GITHUB_APP_PRIVATE_KEY: process.env.GITHUB_APP_PRIVATE_KEY,
+  GITHUB_PUSH_OAUTH_CLIENT_ID: process.env.GITHUB_PUSH_OAUTH_CLIENT_ID,
+  GITHUB_PUSH_OAUTH_CLIENT_SECRET: process.env.GITHUB_PUSH_OAUTH_CLIENT_SECRET,
+  GITHUB_PUSH_OAUTH_REDIRECT_URI: process.env.GITHUB_PUSH_OAUTH_REDIRECT_URI,
   GITLAB_OAUTH_CLIENT_ID: process.env.GITLAB_OAUTH_CLIENT_ID,
   GITLAB_OAUTH_CLIENT_SECRET: process.env.GITLAB_OAUTH_CLIENT_SECRET,
   GITLAB_OAUTH_REDIRECT_URI: process.env.GITLAB_OAUTH_REDIRECT_URI,
@@ -28,6 +33,19 @@ const originalEnv = {
   BITBUCKET_OAUTH_REDIRECT_URI: process.env.BITBUCKET_OAUTH_REDIRECT_URI,
   CREDENTIAL_ENCRYPTION_KEY: process.env.CREDENTIAL_ENCRYPTION_KEY,
 };
+
+function setGitHubPushOAuthConfigured() {
+  process.env.GITHUB_PUSH_OAUTH_CLIENT_ID = 'gh-push-client-id';
+  process.env.GITHUB_PUSH_OAUTH_CLIENT_SECRET = 'gh-push-client-secret';
+  process.env.GITHUB_PUSH_OAUTH_REDIRECT_URI = 'http://localhost:5173/providers/github/push/callback';
+  process.env.CREDENTIAL_ENCRYPTION_KEY = randomBytes(32).toString('base64');
+}
+
+function clearGitHubPushOAuthConfig() {
+  process.env.GITHUB_PUSH_OAUTH_CLIENT_ID = '';
+  process.env.GITHUB_PUSH_OAUTH_CLIENT_SECRET = '';
+  process.env.GITHUB_PUSH_OAUTH_REDIRECT_URI = '';
+}
 
 function setGitLabConfigured() {
   process.env.GITLAB_OAUTH_CLIENT_ID = 'gl-client-id';
@@ -90,6 +108,9 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   restoreEnv('GITHUB_APP_ID', originalEnv.GITHUB_APP_ID);
   restoreEnv('GITHUB_APP_PRIVATE_KEY', originalEnv.GITHUB_APP_PRIVATE_KEY);
+  restoreEnv('GITHUB_PUSH_OAUTH_CLIENT_ID', originalEnv.GITHUB_PUSH_OAUTH_CLIENT_ID);
+  restoreEnv('GITHUB_PUSH_OAUTH_CLIENT_SECRET', originalEnv.GITHUB_PUSH_OAUTH_CLIENT_SECRET);
+  restoreEnv('GITHUB_PUSH_OAUTH_REDIRECT_URI', originalEnv.GITHUB_PUSH_OAUTH_REDIRECT_URI);
   restoreEnv('GITLAB_OAUTH_CLIENT_ID', originalEnv.GITLAB_OAUTH_CLIENT_ID);
   restoreEnv('GITLAB_OAUTH_CLIENT_SECRET', originalEnv.GITLAB_OAUTH_CLIENT_SECRET);
   restoreEnv('GITLAB_OAUTH_REDIRECT_URI', originalEnv.GITLAB_OAUTH_REDIRECT_URI);
@@ -186,6 +207,39 @@ describe('resolveGitHubPushCredentials', () => {
     }
     assert.ok(messageWhenMissing.length > 0 && messageWhenNotInstalled.length > 0);
   });
+
+  it('multi-org isolation — the SAME user with repositories under two different GitHub accounts/organizations resolves EACH repository against its own installation, never the other\'s', async () => {
+    setConfigured();
+    // Repo A lives under a personal account, covered by installation 1;
+    // repo B lives under a different organization, covered by installation
+    // 2 — both connections are owned by the same Origami Lens user (the
+    // exact "personal GitHub + organization GitHub" / "multiple GitHub App
+    // installations" scenario), which the real provider_connections table
+    // has always supported (migration 013's uniqueness is on
+    // (provider, installation_id), never on user_id). The previous
+    // frontend bug (see ProviderConnections.tsx) collapsed the two
+    // connections in the DISPLAY layer only; this test locks down that the
+    // credential-resolution layer underneath Fix-with-AI/PR creation was
+    // never affected and correctly keeps them apart.
+    const connections = new Map<number, ProviderConnection>([
+      [1, { id: 'conn-personal', userId: 'user-a', provider: 'GITHUB', externalAccountLogin: 'octocat', installationId: 1, status: 'ACTIVE', createdAt: 'x', updatedAt: 'x' }],
+      [2, { id: 'conn-org', userId: 'user-a', provider: 'GITHUB', externalAccountLogin: 'acme-corp', installationId: 2, status: 'ACTIVE', createdAt: 'x', updatedAt: 'x' }],
+    ]);
+    const connectionRepo = {
+      findActiveForUserAndInstallation: async (userId: string, installationId: number) =>
+        userId === 'user-a' ? connections.get(installationId) : undefined,
+      upsertGitHubInstallation: async () => connections.get(1)!,
+    };
+
+    mockFetchSequence([{ status: 200, body: { id: 1 } }, { status: 201, body: { token: 'ghs_personal_token', expires_at: '2026-01-01T00:00:00Z' } }]);
+    const credsA = await resolveGitHubPushCredentials('user-a', 'octocat', 'repo-a', { connectionRepo });
+    assert.equal(credsA.token, 'ghs_personal_token');
+
+    mockFetchSequence([{ status: 200, body: { id: 2 } }, { status: 201, body: { token: 'ghs_org_token', expires_at: '2026-01-01T00:00:00Z' } }]);
+    const credsB = await resolveGitHubPushCredentials('user-a', 'acme-corp', 'repo-b', { connectionRepo });
+    assert.equal(credsB.token, 'ghs_org_token');
+    assert.notEqual(credsA.token, credsB.token, 'repo A and repo B must never resolve to the same installation token');
+  });
 });
 
 describe('connectGitHubInstallation', () => {
@@ -197,6 +251,72 @@ describe('connectGitHubInstallation', () => {
     };
     await connectGitHubInstallation('user-a', 42, { connectionRepo, fetchInstallation: async () => ({ id: 42, accountLogin: 'octocat' }) });
     assert.deepEqual(upserted, { id: (upserted as { id: string }).id, userId: 'user-a', installationId: 42, externalAccountLogin: 'octocat' });
+  });
+});
+
+describe('connectGitHubUserPush', () => {
+  it('records the connection for the authenticated user, with the token encrypted (never plaintext)', async () => {
+    setGitHubPushOAuthConfigured();
+    let upserted: Record<string, unknown> | undefined;
+    const connectionRepo = {
+      findActiveGitHubUserPushConnectionForUser: async () => undefined,
+      upsertGitHubUserPushConnection: async (input: Record<string, unknown>) => { upserted = input; return fakeConnection({ installationId: undefined }); },
+    };
+
+    await connectGitHubUserPush('user-a', 'auth-code-xyz', {
+      connectionRepo,
+      exchangeCode: async () => ({ accessToken: 'real-repo-scoped-token' }),
+      fetchProfile: async () => ({ login: 'octocat' }),
+    });
+
+    assert.equal(upserted?.userId, 'user-a');
+    assert.equal(upserted?.externalAccountLogin, 'octocat');
+    assert.notEqual(upserted?.encryptedAccessToken, 'real-repo-scoped-token', 'the raw token must never be passed to storage directly');
+    assert.ok(!JSON.stringify(upserted).includes('real-repo-scoped-token'));
+  });
+});
+
+describe('resolveGitHubUserPushToken', () => {
+  it("resolves and decrypts this user's own direct-push connection", async () => {
+    setGitHubPushOAuthConfigured();
+    const connection = fakeConnection({ userId: 'user-a', installationId: undefined, encryptedAccessToken: encryptCredential('repo-scoped-token') });
+    const connectionRepo = {
+      findActiveGitHubUserPushConnectionForUser: async (userId: string) => (userId === 'user-a' ? connection : undefined),
+      upsertGitHubUserPushConnection: async () => connection,
+    };
+    assert.equal(await resolveGitHubUserPushToken('user-a', { connectionRepo }), 'repo-scoped-token');
+  });
+
+  it('IDOR — a user with no direct-push connection of their own gets undefined, even though a different user has one', async () => {
+    setGitHubPushOAuthConfigured();
+    const connectionRepo = {
+      findActiveGitHubUserPushConnectionForUser: async (userId: string) =>
+        (userId === 'user-a' ? fakeConnection({ userId: 'user-a', installationId: undefined, encryptedAccessToken: encryptCredential('a-token') }) : undefined),
+      upsertGitHubUserPushConnection: async () => fakeConnection(),
+    };
+    assert.equal(await resolveGitHubUserPushToken('user-b', { connectionRepo }), undefined);
+    assert.equal(await resolveGitHubUserPushToken('user-a', { connectionRepo }), 'a-token');
+  });
+
+  it('returns undefined (not a thrown error) without any lookup when GitHub direct-push OAuth is unconfigured', async () => {
+    clearGitHubPushOAuthConfig();
+    let called = false;
+    const connectionRepo = {
+      findActiveGitHubUserPushConnectionForUser: async () => { called = true; return fakeConnection(); },
+      upsertGitHubUserPushConnection: async () => fakeConnection(),
+    };
+    assert.equal(await resolveGitHubUserPushToken('user-a', { connectionRepo }), undefined);
+    assert.equal(called, false);
+  });
+
+  it('returns undefined when the user has a GitHub App installation connection but no direct-push connection', async () => {
+    setGitHubPushOAuthConfigured();
+    const connectionRepo = {
+      // An App-installation row (installationId set) must never be mistaken for a direct-push row.
+      findActiveGitHubUserPushConnectionForUser: async () => undefined,
+      upsertGitHubUserPushConnection: async () => fakeConnection(),
+    };
+    assert.equal(await resolveGitHubUserPushToken('user-a', { connectionRepo }), undefined);
   });
 });
 

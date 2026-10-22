@@ -1,4 +1,4 @@
-import type { Issue, IssueFilters, IssueStatus, ScanListItem, ScanResponse, ScanSummary, Severity } from '@origami/contracts';
+import type { GitHubIssueLink, Issue, IssueFilters, IssueStatus, ScanListItem, ScanResponse, ScanSummary, Severity } from '@origami/contracts';
 import { normalizeLegacySeverity, SEVERITY_ORDER } from '@origami/contracts';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -153,6 +153,42 @@ export class ScanStore {
         this.persistToDisk();
         return scan.issues[idx];
       }
+    }
+    return undefined;
+  }
+
+  findGitHubIssueLink(issueId: string, repositoryId: string, provider: string): GitHubIssueLink | undefined {
+    for (const scan of this.scans.values()) {
+      const issue = scan.issues.find((i) => i.id === issueId);
+      if (issue) return issue.githubIssueLinks?.find((l) => l.repositoryId === repositoryId && l.provider === provider);
+    }
+    return undefined;
+  }
+
+  /**
+   * No-Postgres fallback for linkGitHubIssue (see ScanRepository's own
+   * version for the race-condition reasoning) — this store is a single
+   * process-local Map mutated synchronously with no `await` between the
+   * existence check and the write, so (unlike the Postgres path, which
+   * needs a real UNIQUE constraint) a plain re-check-then-push is already
+   * race-safe for concurrent requests within this one process.
+   */
+  linkGitHubIssue(
+    issueId: string,
+    link: { repositoryId: string; provider: string; githubOwner: string; githubRepository: string; issueNumber: number; issueUrl: string },
+  ): { alreadyExisted: boolean; link: GitHubIssueLink } | undefined {
+    for (const scan of this.scans.values()) {
+      const idx = scan.issues.findIndex((i) => i.id === issueId);
+      if (idx < 0) continue;
+      const issue = scan.issues[idx];
+      const existing = issue.githubIssueLinks?.find((l) => l.repositoryId === link.repositoryId && l.provider === link.provider);
+      if (existing) return { alreadyExisted: true, link: existing };
+
+      const newLink: GitHubIssueLink = { ...link, createdAt: new Date().toISOString() };
+      scan.issues[idx] = { ...issue, githubIssueLinks: [...(issue.githubIssueLinks ?? []), newLink] };
+      this.scans.set(scan.scanId, scan);
+      this.persistToDisk();
+      return { alreadyExisted: false, link: newLink };
     }
     return undefined;
   }

@@ -32,6 +32,13 @@ export interface UpsertGitLabConnectionInput {
   tokenExpiresAt: string;
 }
 
+export interface UpsertGitHubUserPushConnectionInput {
+  id: string;
+  userId: string;
+  externalAccountLogin: string;
+  encryptedAccessToken: string;
+}
+
 export interface UpsertBitbucketConnectionInput {
   id: string;
   userId: string;
@@ -129,6 +136,55 @@ export class ProviderConnectionRepository {
       [connectionId, userId],
     );
     return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * The OAuth-callback entry point for a user's OWN GitHub direct-push
+   * connection (`github-push-oauth.ts`) — a DIFFERENT connection kind than
+   * upsertGitHubInstallation's App-installation rows (those always carry a
+   * real `installation_id`; these always carry NULL). Same "one active
+   * connection per user, enforced at the application layer" pattern as
+   * GitLab/Bitbucket below, since a classic OAuth token has no installation
+   * concept to dedupe on via a DB constraint. A user can therefore hold
+   * BOTH a GitHub App installation row AND this row simultaneously — they
+   * serve different repos (App-installed vs not) and resolvePrStrategy
+   * tries the App row first, this row second.
+   */
+  async upsertGitHubUserPushConnection(input: UpsertGitHubUserPushConnectionInput): Promise<ProviderConnection> {
+    const pool = getPool();
+    if (!pool) throw new Error('Database not configured');
+
+    const existing = await pool.query(
+      `SELECT id FROM provider_connections WHERE user_id = $1 AND provider = 'GITHUB' AND installation_id IS NULL AND status = 'ACTIVE' ORDER BY updated_at DESC LIMIT 1`,
+      [input.userId],
+    );
+
+    if (existing.rows[0]) {
+      const result = await pool.query(
+        `UPDATE provider_connections SET external_account_login = $2, encrypted_access_token = $3, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [existing.rows[0].id, input.externalAccountLogin, input.encryptedAccessToken],
+      );
+      return rowToConnection(result.rows[0]);
+    }
+
+    const result = await pool.query(
+      `INSERT INTO provider_connections (id, user_id, provider, external_account_login, encrypted_access_token, status)
+       VALUES ($1, $2, 'GITHUB', $3, $4, 'ACTIVE')
+       RETURNING *`,
+      [input.id, input.userId, input.externalAccountLogin, input.encryptedAccessToken],
+    );
+    return rowToConnection(result.rows[0]);
+  }
+
+  /** The one lookup resolvePrStrategy's user-direct/fork fallback performs — always this exact user's own ACTIVE direct-push connection, never another user's, and never an App-installation row (installation_id IS NULL is what distinguishes the two GITHUB connection kinds). */
+  async findActiveGitHubUserPushConnectionForUser(userId: string): Promise<ProviderConnection | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+    const result = await pool.query(
+      `SELECT * FROM provider_connections WHERE user_id = $1 AND provider = 'GITHUB' AND installation_id IS NULL AND status = 'ACTIVE' ORDER BY updated_at DESC LIMIT 1`,
+      [userId],
+    );
+    return result.rows[0] ? rowToConnection(result.rows[0]) : undefined;
   }
 
   /**

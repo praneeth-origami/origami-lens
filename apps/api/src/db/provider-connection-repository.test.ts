@@ -68,6 +68,26 @@ describeIfDb('ProviderConnectionRepository (migration 013, real Postgres)', () =
     assert.equal(listA[0].externalAccountLogin, 'a-org');
   });
 
+  it('a single user can hold multiple simultaneous ACTIVE GitHub connections (personal account + organization, or multiple orgs) — the (provider, installation_id) uniqueness has no per-user constraint', async () => {
+    const userId = await createFixtureUser();
+    const repo = new ProviderConnectionRepository();
+    const personalInstallationId = Math.floor(Math.random() * 1e9);
+    const orgInstallationId = Math.floor(Math.random() * 1e9);
+
+    await repo.upsertGitHubInstallation({ id: randomUUID(), userId, installationId: personalInstallationId, externalAccountLogin: 'personal-account' });
+    await repo.upsertGitHubInstallation({ id: randomUUID(), userId, installationId: orgInstallationId, externalAccountLogin: 'company-org' });
+
+    const all = await repo.listForUser(userId);
+    const githubConnections = all.filter((c) => c.provider === 'GITHUB' && c.status === 'ACTIVE');
+    assert.equal(githubConnections.length, 2, 'both installations must remain distinct, ACTIVE rows — neither may overwrite the other');
+    const logins = githubConnections.map((c) => c.externalAccountLogin).sort();
+    assert.deepEqual(logins, ['company-org', 'personal-account']);
+
+    // Each installation must still resolve independently by its own id.
+    assert.equal((await repo.findActiveForUserAndInstallation(userId, personalInstallationId))?.externalAccountLogin, 'personal-account');
+    assert.equal((await repo.findActiveForUserAndInstallation(userId, orgInstallationId))?.externalAccountLogin, 'company-org');
+  });
+
   it('revokeForUser only revokes when the caller actually owns the connection', async () => {
     const userA = await createFixtureUser();
     const userB = await createFixtureUser();
@@ -94,6 +114,70 @@ describeIfDb('ProviderConnectionRepository (migration 013, real Postgres)', () =
     await pool.query('DELETE FROM users WHERE id = $1', [userId]);
 
     assert.equal((await repo.listForUser(userId)).length, 0);
+  });
+
+  it('upsertGitHubUserPushConnection creates a direct-push connection (installation_id NULL) owned by the given user', async () => {
+    const userId = await createFixtureUser();
+    const repo = new ProviderConnectionRepository();
+
+    const connection = await repo.upsertGitHubUserPushConnection({ id: randomUUID(), userId, externalAccountLogin: 'octocat', encryptedAccessToken: 'encrypted-blob' });
+    assert.equal(connection.userId, userId);
+    assert.equal(connection.installationId, undefined, 'a direct-push connection must never carry an installation_id');
+    assert.equal(connection.encryptedAccessToken, 'encrypted-blob');
+    assert.equal(connection.status, 'ACTIVE');
+  });
+
+  it('a second upsertGitHubUserPushConnection for the same user updates the existing row rather than creating a second active connection', async () => {
+    const userId = await createFixtureUser();
+    const repo = new ProviderConnectionRepository();
+
+    const first = await repo.upsertGitHubUserPushConnection({ id: randomUUID(), userId, externalAccountLogin: 'octocat', encryptedAccessToken: 'enc-1' });
+    const second = await repo.upsertGitHubUserPushConnection({ id: randomUUID(), userId, externalAccountLogin: 'octocat', encryptedAccessToken: 'enc-2' });
+
+    assert.equal(second.id, first.id, 'reconnecting must update the same row, not duplicate it');
+    assert.equal(second.encryptedAccessToken, 'enc-2');
+
+    const all = await repo.listForUser(userId);
+    assert.equal(all.filter((c) => c.provider === 'GITHUB' && c.installationId === undefined).length, 1);
+  });
+
+  it('a user can hold BOTH a GitHub App installation connection AND a direct-push connection simultaneously — the two connection kinds coexist without colliding', async () => {
+    const userId = await createFixtureUser();
+    const repo = new ProviderConnectionRepository();
+    const installationId = Math.floor(Math.random() * 1_000_000_000);
+
+    await repo.upsertGitHubInstallation({ id: randomUUID(), userId, installationId, externalAccountLogin: 'acme-corp' });
+    await repo.upsertGitHubUserPushConnection({ id: randomUUID(), userId, externalAccountLogin: 'octocat', encryptedAccessToken: 'enc-push' });
+
+    const all = await repo.listForUser(userId);
+    const githubConnections = all.filter((c) => c.provider === 'GITHUB' && c.status === 'ACTIVE');
+    assert.equal(githubConnections.length, 2);
+
+    assert.equal((await repo.findActiveForUserAndInstallation(userId, installationId))?.externalAccountLogin, 'acme-corp');
+    assert.equal((await repo.findActiveGitHubUserPushConnectionForUser(userId))?.externalAccountLogin, 'octocat');
+  });
+
+  it('IDOR — findActiveGitHubUserPushConnectionForUser only ever resolves this exact user\'s own direct-push connection', async () => {
+    const userA = await createFixtureUser();
+    const userB = await createFixtureUser();
+    const repo = new ProviderConnectionRepository();
+    await repo.upsertGitHubUserPushConnection({ id: randomUUID(), userId: userA, externalAccountLogin: 'a-account', encryptedAccessToken: 'enc-a' });
+
+    assert.equal(await repo.findActiveGitHubUserPushConnectionForUser(userB), undefined);
+    assert.equal((await repo.findActiveGitHubUserPushConnectionForUser(userA))?.externalAccountLogin, 'a-account');
+  });
+
+  it('revokeForUser also works for a direct-push connection, scoped to the real owner', async () => {
+    const userA = await createFixtureUser();
+    const userB = await createFixtureUser();
+    const repo = new ProviderConnectionRepository();
+    const connection = await repo.upsertGitHubUserPushConnection({ id: randomUUID(), userId: userA, externalAccountLogin: 'a-account', encryptedAccessToken: 'enc-a' });
+
+    assert.equal(await repo.revokeForUser(userB, connection.id), false);
+    assert.ok(await repo.findActiveGitHubUserPushConnectionForUser(userA));
+
+    assert.equal(await repo.revokeForUser(userA, connection.id), true);
+    assert.equal(await repo.findActiveGitHubUserPushConnectionForUser(userA), undefined);
   });
 
   it('Phase 16/D — upsertGitLabConnection creates a connection owned by the given user, storing only encrypted values', async () => {

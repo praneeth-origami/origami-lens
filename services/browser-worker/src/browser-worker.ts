@@ -1,6 +1,7 @@
 import { collectPageEvidence, collectLayoutEvidence, runAxeInBrowser } from './page-scripts.js';
 import type { PageEvidenceResult } from './page-scripts.js';
 import type { BrowserEvidence, ConsoleEntry, NetworkEntry } from '@origami/contracts';
+import { DEFAULT_RESPONSIVE_WIDTHS } from '@origami/contracts';
 import { chromium, type Browser, type Page, type CDPSession } from 'playwright';
 import lighthouse from 'lighthouse';
 import { createRequire } from 'node:module';
@@ -13,6 +14,15 @@ export interface ScanOptions {
   mobileViewport?: boolean;
   runLighthouse?: boolean;
   runAxe?: boolean;
+}
+
+export interface ResponsiveViewportEvidence {
+  width: number;
+  dom: BrowserEvidence['dom'];
+  layout: BrowserEvidence['layout'];
+  viewport: BrowserEvidence['viewport'];
+  /** Same page.screenshot({fullPage:false, type:'jpeg', quality:60}) call scanUrl already uses for its desktop/mobile screenshots — never a fabricated/placeholder image. Base64 JPEG, no data: prefix. */
+  screenshotBase64: string;
 }
 
 const DESKTOP_VIEWPORT = { width: 1280, height: 720 };
@@ -159,6 +169,45 @@ export class BrowserWorker {
       }
 
       return evidence;
+    } finally {
+      await context.close();
+    }
+  }
+
+  /** Hard ceiling on how many viewports one request can ask for — a real browser launch/navigation happens once, but each width still means a full layout reflow + DOM re-measurement pass; this bounds worst-case cost regardless of what a caller requests. */
+  private static readonly MAX_RESPONSIVE_WIDTHS = 8;
+  /** A generous, fixed viewport HEIGHT for every requested width — Automatic Responsive Testing (roadmap Phase 4) cares about each width's LAYOUT (overflow/overlap/off-screen elements), not scroll-length, so a single tall-enough height avoids needing a separate, harder-to-justify height-per-width table. */
+  private static readonly RESPONSIVE_VIEWPORT_HEIGHT = 900;
+
+  /**
+   * Renders ONE already-loaded page at several widths and returns each
+   * width's raw dom+layout+viewport evidence slice — never runs the rule
+   * engine itself (that's apps/api's responsive-test-service.ts, reusing
+   * the existing OrigamiRuleEngine/HealthScoreEngine unchanged). A single
+   * navigation is reused across all widths (only the viewport is resized
+   * between passes) since the DOM itself doesn't change per breakpoint —
+   * only what CSS renders from it does.
+   */
+  async scanResponsiveViewports(url: string, widths: number[] = [...DEFAULT_RESPONSIVE_WIDTHS]): Promise<ResponsiveViewportEvidence[]> {
+    await this.init();
+    const browser = this.browser!;
+    const boundedWidths = widths.slice(0, BrowserWorker.MAX_RESPONSIVE_WIDTHS);
+    const context = await browser.newContext({ viewport: { width: boundedWidths[0] ?? DESKTOP_VIEWPORT.width, height: BrowserWorker.RESPONSIVE_VIEWPORT_HEIGHT } });
+    const page = await context.newPage();
+
+    try {
+      await page.goto(url, { waitUntil: 'load', timeout: 30000 });
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+
+      const results: ResponsiveViewportEvidence[] = [];
+      for (const width of boundedWidths) {
+        await page.setViewportSize({ width, height: BrowserWorker.RESPONSIVE_VIEWPORT_HEIGHT });
+        await page.waitForTimeout(300);
+        const pageData = (await page.evaluate(collectPageEvidence)) as PageEvidenceResult;
+        const screenshotBase64 = (await page.screenshot({ fullPage: false, type: 'jpeg', quality: 60 })).toString('base64');
+        results.push({ width, dom: pageData.dom, layout: pageData.layout, viewport: pageData.viewport, screenshotBase64 });
+      }
+      return results;
     } finally {
       await context.close();
     }

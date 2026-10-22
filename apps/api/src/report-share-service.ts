@@ -8,12 +8,12 @@
  * it (organizationIds membership) — no new permission model.
  */
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
-import type { LensReport, ReportErrorCode, ScanResponse } from '@origami/contracts';
+import type { LensReport, ReportBranding, ReportErrorCode, ScanResponse } from '@origami/contracts';
 import { buildLensReport, isReportReady } from './report-service.js';
 
 export interface ReportShareLinkRepo {
-  create(input: { id: string; scanId: string; tokenHash: string; createdBy?: string }): Promise<void>;
-  findActiveByScanId(scanId: string): Promise<{ id: string } | undefined>;
+  create(input: { id: string; scanId: string; tokenHash: string; createdBy?: string; expiresAt?: string }): Promise<void>;
+  findActiveByScanId(scanId: string): Promise<{ id: string; expiresAt?: string } | undefined>;
   findValidByTokenHash(tokenHash: string): Promise<{ scanId: string } | undefined>;
   revokeActiveByScanId(scanId: string): Promise<void>;
 }
@@ -51,7 +51,8 @@ export async function createOrRotateReportShare(
   scanId: string,
   organizationIds: string[],
   createdBy: string,
-): Promise<{ token: string; url: string }> {
+  expiresInDays?: number,
+): Promise<{ token: string; url: string; expiresAt?: string }> {
   const scan = await loadOwnedScan(deps, scanId, organizationIds);
   if (!isReportReady(scan.status)) {
     throw new ReportShareError('This scan has not completed successfully yet, so it has no report to share.', 'REPORT_NOT_READY');
@@ -59,18 +60,19 @@ export async function createOrRotateReportShare(
 
   await deps.shareLinkRepo.revokeActiveByScanId(scanId);
   const { rawToken, tokenHash } = generateShareToken();
-  await deps.shareLinkRepo.create({ id: randomUUID(), scanId, tokenHash, createdBy });
-  return { token: rawToken, url: `${deps.webAppBaseUrl}/reports/share/${rawToken}` };
+  const expiresAt = expiresInDays && expiresInDays > 0 ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString() : undefined;
+  await deps.shareLinkRepo.create({ id: randomUUID(), scanId, tokenHash, createdBy, expiresAt });
+  return { token: rawToken, url: `${deps.webAppBaseUrl}/reports/share/${rawToken}`, expiresAt };
 }
 
 export async function getReportShareStatus(
   deps: { shareLinkRepo: ReportShareLinkRepo; scanStore: ReportShareScanStore },
   scanId: string,
   organizationIds: string[],
-): Promise<{ active: boolean }> {
+): Promise<{ active: boolean; expiresAt?: string }> {
   await loadOwnedScan(deps, scanId, organizationIds);
   const active = await deps.shareLinkRepo.findActiveByScanId(scanId);
-  return { active: !!active };
+  return { active: !!active, expiresAt: active?.expiresAt };
 }
 
 export async function revokeReportShare(
@@ -82,9 +84,15 @@ export async function revokeReportShare(
   await deps.shareLinkRepo.revokeActiveByScanId(scanId);
 }
 
-/** Public path — the raw token itself IS the authorization (no organizationIds check, matching /invitations/:token's precedent exactly). */
+/**
+ * Public path — the raw token itself IS the authorization (no
+ * organizationIds check, matching /invitations/:token's precedent exactly).
+ * `resolveBranding` is optional and injected (not imported directly) so
+ * this file never depends on entitlement-service.ts — same DI boundary
+ * every other cross-feature dependency in this codebase uses.
+ */
 export async function getSharedReportByToken(
-  deps: { shareLinkRepo: ReportShareLinkRepo; scanStore: ReportShareScanStore },
+  deps: { shareLinkRepo: ReportShareLinkRepo; scanStore: ReportShareScanStore; resolveBranding?: (organizationId: string | undefined) => Promise<ReportBranding | undefined> },
   rawToken: string,
 ): Promise<LensReport> {
   const tokenHash = createHash('sha256').update(rawToken).digest('hex');
@@ -94,5 +102,6 @@ export async function getSharedReportByToken(
   const scan = await deps.scanStore.getScanAsync(link.scanId);
   if (!scan) throw new ReportShareError('This share link is invalid or has been disabled.', 'REPORT_SHARE_NOT_FOUND');
 
-  return buildLensReport(scan);
+  const branding = await deps.resolveBranding?.(scan.organizationId);
+  return buildLensReport(scan, branding);
 }

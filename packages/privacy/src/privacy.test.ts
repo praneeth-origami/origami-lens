@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeEvidence, sanitizeForAi, detectBlockingSensitiveContent, sanitizeComponentEvidence } from './index.js';
+import { sanitizeEvidence, sanitizeForAi, detectBlockingSensitiveContent, sanitizeComponentEvidence, scrubString } from './index.js';
 import type { BrowserEvidence, ComponentDomNode, ComponentEvidence } from '@origami/contracts';
 
 const baseEvidence: BrowserEvidence = {
@@ -43,6 +43,41 @@ describe('PrivacyScrubber', () => {
       cookie: 'session=abc',
     });
     assert.equal(payload.cookie, '[REDACTED]');
+  });
+
+  // Found auditing Create Bug Report: scrubString previously only matched
+  // specific VALUE shapes (JWT/Bearer/sk-.../email/card number), so a
+  // `?token=`/`password=` query param or free-text pair embedded in a
+  // network error's URL or a console error's message passed through
+  // completely untouched.
+  describe('scrubString — sensitive key=value pairs (bugfix: previously untouched)', () => {
+    it('redacts a token query parameter in a URL', () => {
+      const result = scrubString('https://example.com/api/cart?token=secret123&id=5');
+      assert.ok(!result.includes('secret123'));
+      assert.match(result, /token=\[REDACTED\]/);
+      assert.ok(result.includes('id=5'), 'an unrelated query param must be left alone');
+    });
+
+    it('redacts a password=value pair inside a free-text console message', () => {
+      const result = scrubString("Cannot read properties of undefined (reading 'foo') password=hunter2");
+      assert.ok(!result.includes('hunter2'));
+      assert.match(result, /password=\[REDACTED\]/);
+    });
+
+    it('redacts an api_key value', () => {
+      const result = scrubString('https://api.example.com/v1/x?api_key=sk_live_abcdef123456');
+      assert.ok(!result.includes('sk_live_abcdef123456'));
+    });
+
+    it('redacts a session id in "key: value" form', () => {
+      const result = scrubString('session: 9f8e7d6c5b4a');
+      assert.ok(!result.includes('9f8e7d6c5b4a'));
+    });
+
+    it('leaves ordinary, non-sensitive query parameters untouched', () => {
+      const result = scrubString('https://example.com/search?query=shoes&page=2');
+      assert.equal(result, 'https://example.com/search?query=shoes&page=2');
+    });
   });
 });
 

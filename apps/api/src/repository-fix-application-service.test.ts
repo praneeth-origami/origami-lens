@@ -373,7 +373,18 @@ describe('applyFindingFix', () => {
     });
     await assert.rejects(
       () => applyFindingFix(repository, SAMPLE_FINDING, proposal, stores, { repositoryId: repository.id, ownerId }),
-      (error: unknown) => { assert.ok(error instanceof FixApplicationError); assert.equal(error.code, 'SYNTAX_VALIDATION_FAILED'); return true; },
+      (error: unknown) => {
+        assert.ok(error instanceof FixApplicationError);
+        assert.equal(error.code, 'SYNTAX_VALIDATION_FAILED');
+        assert.ok(error.syntaxError, 'expected a structured syntaxError detail, not just a generic message');
+        assert.equal(error.syntaxError!.filePath, 'src/broken.ts');
+        assert.equal(error.syntaxError!.validationType, 'TypeScript syntax');
+        assert.ok(error.syntaxError!.line >= 1);
+        assert.ok(error.syntaxError!.column >= 1);
+        assert.ok(error.syntaxError!.message.length > 0);
+        assert.match(error.message, /line \d+, column \d+/);
+        return true;
+      },
     );
     assert.equal(sha256(fs.readFileSync(path.join(cloneDir, 'src/broken.ts'), 'utf-8')), beforeHash);
   });

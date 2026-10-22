@@ -261,10 +261,10 @@ export async function createBranch(repoDir: string, branchName: string, signal?:
   }
 }
 
-/** `git ls-remote --exit-code --heads origin <branch>` — exit code 2 means "no such ref", which execFile reports as a non-zero-exit error; that specific case is treated as "does not exist" rather than an error. Any OTHER failure (auth, network) is surfaced as remote_unavailable. */
-export async function branchExistsOnRemote(repoDir: string, branchName: string, signal?: AbortSignal, credentials?: GitCredentials): Promise<boolean> {
+/** `git ls-remote --exit-code --heads <remote> <branch>` — exit code 2 means "no such ref", which execFile reports as a non-zero-exit error; that specific case is treated as "does not exist" rather than an error. Any OTHER failure (auth, network) is surfaced as remote_unavailable. `remoteName` defaults to `origin` (the original repo) — a fork PR (USER_FORK) checks collisions against the `fork` remote instead, since that's where the branch is actually about to be pushed. */
+export async function branchExistsOnRemote(repoDir: string, branchName: string, signal?: AbortSignal, credentials?: GitCredentials, remoteName = 'origin'): Promise<boolean> {
   try {
-    const { stdout } = await run(['-C', repoDir, ...buildAuthHeaderArgs(credentials), 'ls-remote', '--exit-code', '--heads', 'origin', branchName], { signal });
+    const { stdout } = await run(['-C', repoDir, ...buildAuthHeaderArgs(credentials), 'ls-remote', '--exit-code', '--heads', remoteName, branchName], { signal });
     return stdout.trim().length > 0;
   } catch (error) {
     const code = (error as { code?: number }).code;
@@ -275,14 +275,34 @@ export async function branchExistsOnRemote(repoDir: string, branchName: string, 
   }
 }
 
-/** `git ls-remote --symref origin HEAD` — resolves the remote's actual default branch without a full clone/fetch. Returns undefined if the remote's default branch cannot be determined (caller falls back to a configured/heuristic default). */
-export async function getRemoteDefaultBranch(repoDir: string, signal?: AbortSignal, credentials?: GitCredentials): Promise<string | undefined> {
+/** `git ls-remote --symref <remote> HEAD` — resolves the remote's actual default branch without a full clone/fetch. Returns undefined if the remote's default branch cannot be determined (caller falls back to a configured/heuristic default). `remoteName` defaults to `origin`, same rationale as branchExistsOnRemote. */
+export async function getRemoteDefaultBranch(repoDir: string, signal?: AbortSignal, credentials?: GitCredentials, remoteName = 'origin'): Promise<string | undefined> {
   try {
-    const { stdout } = await run(['-C', repoDir, ...buildAuthHeaderArgs(credentials), 'ls-remote', '--symref', 'origin', 'HEAD'], { signal });
+    const { stdout } = await run(['-C', repoDir, ...buildAuthHeaderArgs(credentials), 'ls-remote', '--symref', remoteName, 'HEAD'], { signal });
     const match = stdout.match(/ref:\s*refs\/heads\/(\S+)\s+HEAD/);
     return match?.[1];
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Adds a second remote pointing at a user's fork (USER_FORK strategy) —
+ * `origin` always stays pointed at the ORIGINAL repository (set at clone
+ * time), so a fork's branch is pushed to this separate, explicitly-named
+ * remote instead, never by rewriting `origin`. The URL itself carries no
+ * credentials (same discipline as every other remote in this module —
+ * auth is always the per-invocation `http.extraheader`, never embedded in
+ * a URL); safe to call again with the same name (git errors on a
+ * duplicate, which the caller treats as "already added").
+ */
+export async function addRemote(repoDir: string, name: string, url: string, signal?: AbortSignal): Promise<void> {
+  try {
+    await run(['-C', repoDir, 'remote', 'add', name, url], { signal });
+  } catch (error) {
+    const stderr = sanitizeGitError((error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : String(error)));
+    if (/already exists/i.test(stderr)) return;
+    throw new GitWorkflowError(`Failed to add remote '${name}': ${stderr}`, 'git_error');
   }
 }
 
@@ -332,12 +352,16 @@ export async function commitStaged(repoDir: string, message: string, authorName:
  * account username only for the legacy App Password fallback. This function
  * itself has no provider-specific knowledge — it only ever builds a
  * Basic-auth header from whatever it's given.
+ *
+ * `remoteName` defaults to `origin` (unchanged behavior for every existing
+ * caller) — a fork PR (USER_FORK) passes `'fork'` (see addRemote) so the
+ * branch is pushed to the user's fork, never to `origin`/the original repo.
  */
-export async function pushBranch(repoDir: string, branchName: string, token: string, signal?: AbortSignal, username = 'x-access-token'): Promise<void> {
+export async function pushBranch(repoDir: string, branchName: string, token: string, signal?: AbortSignal, username = 'x-access-token', remoteName = 'origin'): Promise<void> {
   const basicAuth = Buffer.from(`${username}:${token}`).toString('base64');
   try {
     await run(
-      ['-C', repoDir, ...buildAuthHeaderArgs({ token, username }), 'push', '--set-upstream', 'origin', '--', branchName],
+      ['-C', repoDir, ...buildAuthHeaderArgs({ token, username }), 'push', '--set-upstream', remoteName, '--', branchName],
       { signal },
     );
   } catch (error) {

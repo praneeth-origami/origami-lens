@@ -7,7 +7,7 @@ function fakeSubscription(plan: SubscriptionPlan, seatCount = 1): Subscription {
   return { organizationId: 'org-1', plan, status: 'ACTIVE', billingInterval: plan === 'FREE' ? null : 'MONTHLY', seatCount, cancelAtPeriodEnd: false };
 }
 
-function buildService(plan: SubscriptionPlan, opts: { seatCount?: number; membersCount?: number } = {}) {
+function buildService(plan: SubscriptionPlan, opts: { seatCount?: number; membersCount?: number; internalMembersCount?: number } = {}) {
   const consumeCalls: unknown[] = [];
   const counts = new Map<string, number>();
   return {
@@ -25,7 +25,10 @@ function buildService(plan: SubscriptionPlan, opts: { seatCount?: number; member
         },
         getCount: async (organizationId, metric, usageDate) => counts.get(`${organizationId}:${metric}:${usageDate}`) ?? 0,
       },
-      organizationRepo: { countMembers: async () => opts.membersCount ?? 1 },
+      organizationRepo: {
+        countMembers: async () => opts.membersCount ?? 1,
+        countInternalMembers: async () => opts.internalMembersCount ?? opts.membersCount ?? 1,
+      },
     }),
   };
 }
@@ -51,6 +54,50 @@ describe('EntitlementService — getEntitlements', () => {
     const entitlements = await service.getEntitlements('org-1');
     assert.equal(entitlements.seatsIncluded, 5);
     assert.equal(entitlements.seatsUsed, 3);
+  });
+
+  it('bugfix (Agency seat cap): seatsUsed counts INTERNAL members only, excluding CLIENT_VIEWER', async () => {
+    const { service } = buildService('AGENCY', { seatCount: 15, membersCount: 5, internalMembersCount: 3 });
+    const entitlements = await service.getEntitlements('org-1');
+    assert.equal(entitlements.seatsUsed, 3);
+  });
+});
+
+describe('EntitlementService — checkSeatCapacity (Agency hard seat cap)', () => {
+  it('every plan except Agency has no hard cap (always allowed, limit null)', async () => {
+    for (const plan of ['FREE', 'DEVELOPER', 'PRO', 'TEAM'] as const) {
+      const { service } = buildService(plan, { internalMembersCount: 999 });
+      const result = await service.checkSeatCapacity('org-1');
+      assert.equal(result.allowed, true, `plan ${plan}`);
+      assert.equal(result.limit, null, `plan ${plan}`);
+    }
+  });
+
+  it('Agency allows invites below the 15-seat cap', async () => {
+    const { service } = buildService('AGENCY', { internalMembersCount: 10 });
+    const result = await service.checkSeatCapacity('org-1');
+    assert.equal(result.allowed, true);
+    assert.equal(result.limit, 15);
+  });
+
+  it('Agency blocks once internal membership reaches the 15-seat cap', async () => {
+    const { service } = buildService('AGENCY', { internalMembersCount: 15 });
+    const result = await service.checkSeatCapacity('org-1');
+    assert.equal(result.allowed, false);
+    assert.equal(result.limit, 15);
+  });
+});
+
+describe('EntitlementService — Agency-only capability checks', () => {
+  it('canManageClientWorkspaces is true only for AGENCY', async () => {
+    assert.equal(await buildService('AGENCY').service.canManageClientWorkspaces('org-1'), true);
+    assert.equal(await buildService('TEAM').service.canManageClientWorkspaces('org-1'), false);
+    assert.equal(await buildService('FREE').service.canManageClientWorkspaces('org-1'), false);
+  });
+
+  it('canUseWhiteLabelBranding is true only for AGENCY', async () => {
+    assert.equal(await buildService('AGENCY').service.canUseWhiteLabelBranding('org-1'), true);
+    assert.equal(await buildService('PRO').service.canUseWhiteLabelBranding('org-1'), false);
   });
 });
 
@@ -119,7 +166,7 @@ function buildServiceForNotificationTests(opts: NotificationTestOpts = {}) {
         return typeof opts.claimResult === 'function' ? opts.claimResult() : opts.claimResult ?? true;
       },
     },
-    organizationRepo: { countMembers: async () => members.length, listMembers: async () => members },
+    organizationRepo: { countMembers: async () => members.length, countInternalMembers: async () => members.length, listMembers: async () => members },
     ...(opts.omitSend
       ? {}
       : {

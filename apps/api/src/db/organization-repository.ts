@@ -6,6 +6,7 @@ function rowToOrganization(row: Record<string, unknown>): Organization {
     id: row.id as string,
     name: row.name as string,
     personalOwnerUserId: (row.personal_owner_user_id as string) ?? undefined,
+    parentOrganizationId: (row.parent_organization_id as string) ?? undefined,
     createdAt: (row.created_at as Date).toISOString(),
     updatedAt: (row.updated_at as Date).toISOString(),
   };
@@ -69,6 +70,26 @@ export class OrganizationRepository {
     return (result.rows[0]?.count as number) ?? 0;
   }
 
+  /**
+   * Agency plan (V4) — internal (non-CLIENT_VIEWER) member count, used for
+   * seat-limit enforcement (EntitlementService.checkSeatCapacity). Distinct
+   * from countMembers() above (every role, used for display/billing seat
+   * totals elsewhere) — a CLIENT_VIEWER is explicitly never meant to
+   * consume an internal seat, per the Agency requirements doc. No-op
+   * behavior change for any plan that has never used CLIENT_VIEWER (every
+   * plan before Agency), since this only differs from countMembers() when
+   * a CLIENT_VIEWER row actually exists.
+   */
+  async countInternalMembers(organizationId: string): Promise<number> {
+    const pool = getPool();
+    if (!pool) return 1;
+    const result = await pool.query(
+      `SELECT COUNT(*)::int AS count FROM organization_memberships WHERE organization_id = $1 AND role != 'CLIENT_VIEWER'`,
+      [organizationId],
+    );
+    return (result.rows[0]?.count as number) ?? 0;
+  }
+
   async getPersonalOrganization(userId: string): Promise<Organization | undefined> {
     const pool = getPool();
     if (!pool) return undefined;
@@ -117,6 +138,74 @@ export class OrganizationRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Agency plan (V4) — creates a brand-new, non-personal organization owned
+   * by the creating user, linked to the agency's own organization via
+   * parent_organization_id for listing purposes only (see migration 042's
+   * doc comment — this grants NO access by itself). Mirrors
+   * getOrCreatePersonalOrganization's exact transaction shape (insert
+   * organizations row + insert the creator's OWNER membership row
+   * atomically) — the only genuinely new route/function the audit found
+   * necessary, since nothing before Agency could ever create a second,
+   * non-personal organization.
+   */
+  async createClientWorkspace(agencyOrganizationId: string, creatorUserId: string, name: string): Promise<Organization> {
+    const pool = getPool();
+    if (!pool) throw new Error('Database not configured');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const orgResult = await client.query(
+        `INSERT INTO organizations (id, name, parent_organization_id)
+         VALUES (gen_random_uuid(), $1, $2)
+         RETURNING *`,
+        [name, agencyOrganizationId],
+      );
+      const organization = rowToOrganization(orgResult.rows[0]);
+      await client.query(
+        `INSERT INTO organization_memberships (id, organization_id, user_id, role)
+         VALUES (gen_random_uuid(), $1, $2, 'OWNER')`,
+        [organization.id, creatorUserId],
+      );
+      await client.query('COMMIT');
+      return organization;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Agency plan (V4) — every client workspace this agency organization created, with a live member count for the "Client workspaces" list UI. Does NOT include workspaces this agency's staff merely happen to be invited into (that's an ordinary membership, unrelated to this parent/child listing relationship). */
+  async listClientWorkspacesForAgency(agencyOrganizationId: string): Promise<{ organizationId: string; name: string; memberCount: number; createdAt: string }[]> {
+    const pool = getPool();
+    if (!pool) return [];
+    const result = await pool.query(
+      `SELECT o.id, o.name, o.created_at, (SELECT COUNT(*)::int FROM organization_memberships m WHERE m.organization_id = o.id) AS member_count
+       FROM organizations o WHERE o.parent_organization_id = $1 ORDER BY o.created_at DESC`,
+      [agencyOrganizationId],
+    );
+    return result.rows.map((row) => ({
+      organizationId: row.id as string,
+      name: row.name as string,
+      memberCount: row.member_count as number,
+      createdAt: (row.created_at as Date).toISOString(),
+    }));
+  }
+
+  /** Agency plan (V4) — is this organization a client workspace belonging to the given agency? Used to authorize a client-workspace-scoped action without trusting the caller's own claim about the relationship. */
+  async isClientWorkspaceOfAgency(clientOrganizationId: string, agencyOrganizationId: string): Promise<boolean> {
+    const pool = getPool();
+    if (!pool) return false;
+    const result = await pool.query(
+      `SELECT 1 FROM organizations WHERE id = $1 AND parent_organization_id = $2`,
+      [clientOrganizationId, agencyOrganizationId],
+    );
+    return result.rows.length > 0;
   }
 
   /** Phase 18 — GET /admin/workspaces's data source. One row per organization with its current owner's email (LEFT JOIN — a personal organization always has exactly one OWNER row by construction, so this never fans out). Plan/member-count are layered on by admin-service.ts (separate, small tables — not worth a bigger join here). */

@@ -2,11 +2,10 @@
 node_modules/
 dist/
 build/
-.env
-.env.local
 *.log
 coverage/
 .playwright/
+temp_auto_push.bat
 playwright-report/
 test-results/
 *.crx
@@ -17,3 +16,6 @@ __pycache__/
 venv/
 .DS_Store
 Thumbs.db
+.gitignore
+branch_structure.json
+config.bat

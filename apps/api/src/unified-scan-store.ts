@@ -1,5 +1,7 @@
 import type {
+  BrowserEvidence,
   CreateScanRequest,
+  GitHubIssueLink,
   Issue,
   IssueStatus,
   ScanListItem,
@@ -17,10 +19,10 @@ export class UnifiedScanStore {
   private legacy = new ScanStore();
   private repo = new ScanRepository();
 
-  saveScan(scan: ScanResponse): ScanResponse {
+  saveScan(scan: ScanResponse, fullEvidence?: BrowserEvidence): ScanResponse {
     this.legacy.saveScan(scan);
     if (this.repo.isEnabled()) {
-      void this.repo.saveCurrentPageScan(scan);
+      void this.repo.saveCurrentPageScan(scan, fullEvidence);
     }
     return scan;
   }
@@ -156,6 +158,44 @@ export class UnifiedScanStore {
       void this.repo.updateIssueRepository(issueId, repositoryId);
     }
     return updated;
+  }
+
+  /**
+   * Server-side authority for "does this finding already have a GitHub
+   * Issue in this repository" (migration 040) — Postgres is authoritative
+   * when enabled (never a fire-and-forget read), since the caller uses this
+   * result to decide whether to call the real GitHub API at all.
+   */
+  async findGitHubIssueLinkAsync(issueId: string, repositoryId: string, provider: string): Promise<GitHubIssueLink | undefined> {
+    if (this.repo.isEnabled()) {
+      try {
+        return await this.repo.findGitHubIssueLink(issueId, repositoryId, provider);
+      } catch (error) {
+        console.error('[unified-scan-store] Postgres read failed, falling back to legacy store:', error instanceof Error ? error.message : error);
+      }
+    }
+    return this.legacy.findGitHubIssueLink(issueId, repositoryId, provider);
+  }
+
+  /**
+   * Atomically records a newly-created GitHub Issue (migration 040) —
+   * unlike setIssueRepositoryAsync's fire-and-forget dual-write, this is
+   * fully awaited against whichever store is authoritative: the decision
+   * of whether a second concurrent caller sees "already exists" depends on
+   * this write actually landing before it returns.
+   */
+  async linkGitHubIssueAsync(
+    issueId: string,
+    link: { repositoryId: string; provider: string; githubOwner: string; githubRepository: string; issueNumber: number; issueUrl: string; createdByUserId?: string },
+  ): Promise<{ alreadyExisted: boolean; link: GitHubIssueLink } | undefined> {
+    if (this.repo.isEnabled()) {
+      try {
+        return await this.repo.linkGitHubIssue(issueId, link);
+      } catch (error) {
+        console.error('[unified-scan-store] Postgres write failed, falling back to legacy store:', error instanceof Error ? error.message : error);
+      }
+    }
+    return this.legacy.linkGitHubIssue(issueId, link);
   }
 
   /** The authorization-aware mutation (UX audit follow-up) — verifies the issue's scan belongs to one of the caller's organizations before writing anywhere. */

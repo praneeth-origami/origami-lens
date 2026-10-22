@@ -1,7 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import jpeg from 'jpeg-js';
 import type { LensReport } from '@origami/contracts';
 import { renderReportPdf } from './report-pdf-renderer.js';
+
+function fakeJpeg(width: number, height: number): Buffer {
+  const data = Buffer.alloc(width * height * 4, 128);
+  return Buffer.from(jpeg.encode({ width, height, data }, 80).data);
+}
 
 function fakeReport(overrides: Partial<LensReport> = {}): LensReport {
   return {
@@ -21,7 +27,7 @@ function fakeReport(overrides: Partial<LensReport> = {}): LensReport {
       seo: 68,
       securityHygiene: 91,
     },
-    summary: { critical: 0, high: 3, medium: 8, low: 14 },
+    summary: { critical: 0, high: 3, medium: 8, low: 14, important: 3, improvements: 22 },
     issues: [
       {
         id: 'issue-1',
@@ -69,5 +75,18 @@ describe('renderReportPdf', () => {
     const buffer = await renderReportPdf(fakeReport({ issues: manyIssues }));
     assert.equal(buffer.subarray(0, 5).toString('latin1'), '%PDF-');
     assert.ok(buffer.length > 2000);
+  });
+
+  it('embeds a real desktop screenshot when provided (roadmap Phase 6) — a meaningfully larger, still valid PDF', async () => {
+    const withoutScreenshot = await renderReportPdf(fakeReport());
+    const withScreenshot = await renderReportPdf(fakeReport(), { desktop: fakeJpeg(200, 120) });
+
+    assert.equal(withScreenshot.subarray(0, 5).toString('latin1'), '%PDF-');
+    assert.ok(withScreenshot.length > withoutScreenshot.length, 'embedding an image should make the PDF meaningfully larger');
+  });
+
+  it('never throws when the provided screenshot buffer is not a real image', async () => {
+    const buffer = await renderReportPdf(fakeReport(), { desktop: Buffer.from('not a real image') });
+    assert.equal(buffer.subarray(0, 5).toString('latin1'), '%PDF-');
   });
 });

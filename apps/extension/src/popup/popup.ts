@@ -1,9 +1,14 @@
 import { API_BASE, DASHBOARD_BASE, type ScanResult } from '../types/scan.js';
 import type { PersistedActiveScan } from '../shared/scan-storage.js';
 import { isInProgressStatus, isTerminalStatus } from '../shared/scan-storage.js';
-import type { StartScanResponse } from '../shared/messages.js';
+import type { ResponsiveTestMessageResponse, StartScanResponse } from '../shared/messages.js';
+import type { PersistedResponsiveTest } from '../shared/responsive-test-storage.js';
+import { RESPONSIVE_TEST_STORAGE_KEY } from '../shared/responsive-test-storage.js';
 import type { PersistedComponentJob } from '../shared/component-storage.js';
 import { isComponentJobInProgress, isComponentJobTerminal } from '../shared/component-storage.js';
+import { DEFAULT_RESPONSIVE_WIDTHS } from '@origami/contracts';
+import type { Issue, IssueCategory, ResponsiveTestResult, ResponsiveViewportResult, Severity } from '@origami/contracts';
+import type { BugReportFormInput, CreateBugReportMessageResponse } from '../shared/messages.js';
 
 type ViewId =
   | 'initial'
@@ -12,7 +17,13 @@ type ViewId =
   | 'website-progress'
   | 'results'
   | 'issue-detail'
-  | 'error';
+  | 'responsive-progress'
+  | 'responsive-results'
+  | 'responsive-issue-detail'
+  | 'bug-report-form'
+  | 'bug-report-result'
+  | 'error'
+  | 'auth-required';
 
 interface ScanStatusResponse {
   scanId: string;
@@ -48,7 +59,13 @@ const views: Record<ViewId, HTMLElement> = {
   'website-progress': document.getElementById('view-website-progress')!,
   results: document.getElementById('view-results')!,
   'issue-detail': document.getElementById('view-issue-detail')!,
+  'responsive-progress': document.getElementById('view-responsive-progress')!,
+  'responsive-results': document.getElementById('view-responsive-results')!,
+  'responsive-issue-detail': document.getElementById('view-responsive-issue-detail')!,
+  'bug-report-form': document.getElementById('view-bug-report-form')!,
+  'bug-report-result': document.getElementById('view-bug-report-result')!,
   error: document.getElementById('view-error')!,
+  'auth-required': document.getElementById('view-auth-required')!,
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -82,7 +99,22 @@ function stopPopupPolling() {
   }
 }
 
-function friendlyError(raw: string): { title: string; body: string; detail?: string } {
+function friendlyError(raw: string, errorCode?: string): { title: string; body: string; detail?: string } {
+  // Checked BEFORE the substring heuristics below: a real API errorCode is an
+  // exact, authoritative signal (see PersistedActiveScan.errorCode's doc
+  // comment) and must never be shadowed by a coincidental keyword match in
+  // the message text. USAGE_LIMIT_EXCEEDED's server message is already
+  // specific and accurate ("Daily limit reached for your plan (N
+  // inspections/day). Upgrade to continue.") — shown directly rather than
+  // re-worded, so the real plan/limit numbers never go stale here.
+  if (errorCode === 'USAGE_LIMIT_EXCEEDED') {
+    return { title: 'Daily limit reached', body: raw };
+  }
+  // UNAUTHENTICATED is handled entirely separately — see setError, which
+  // routes it to the dedicated #view-auth-required view instead of calling
+  // this function at all (it's a real permission state, not a failure, and
+  // gets its own richer layout rather than reusing the generic error view).
+
   const lower = raw.toLowerCase();
   if (lower.includes('timeout') || lower.includes('abort')) {
     return {
@@ -125,8 +157,15 @@ function friendlyError(raw: string): { title: string; body: string; detail?: str
   };
 }
 
-function setError(message: string) {
-  const err = friendlyError(message);
+function setError(message: string, errorCode?: string) {
+  // A real permission state, not a failure — its own dedicated view (see
+  // popup.html's #view-auth-required) rather than the generic error view.
+  if (errorCode === 'UNAUTHENTICATED') {
+    showAuthRequired();
+    return;
+  }
+
+  const err = friendlyError(message, errorCode);
   const titleEl = document.querySelector('#view-error .page-title');
   if (titleEl) titleEl.textContent = err.title;
   document.getElementById('error-message')!.textContent = err.body;
@@ -138,7 +177,26 @@ function setError(message: string) {
     detailEl.textContent = '';
     detailEl.classList.add('hidden');
   }
+
+  // "Try again" makes no sense for a plan/quota limit — retrying just hits
+  // the same 402 until the limit resets. Show "View Plans" instead for that
+  // one case; every other error keeps the original retry button unchanged.
+  const viewPlansBtn = document.getElementById('view-plans-btn') as HTMLAnchorElement;
+  const retryBtn = document.getElementById('retry-btn')!;
+  const isPlanLimit = errorCode === 'USAGE_LIMIT_EXCEEDED';
+  retryBtn.classList.toggle('hidden', isPlanLimit);
+  viewPlansBtn.classList.toggle('hidden', !isPlanLimit);
+  if (isPlanLimit) {
+    viewPlansBtn.href = `${dashboardOrigin()}/pricing`;
+  }
+
   showView('error');
+}
+
+function showAuthRequired() {
+  const signInBtn = document.getElementById('auth-sign-in-btn') as HTMLAnchorElement;
+  signInBtn.href = `${dashboardOrigin()}/login`;
+  showView('auth-required');
 }
 
 function parseHostname(url: string): string {
@@ -277,7 +335,7 @@ async function applyActiveScanToUI(activeScan: PersistedActiveScan): Promise<boo
     }
 
     if (activeScan.status === 'FAILED' || activeScan.status === 'CANCELLED') {
-      setError(activeScan.error ?? 'Website scan failed.');
+      setError(activeScan.error ?? 'Website scan failed.', activeScan.errorCode);
       return true;
     }
 
@@ -296,7 +354,7 @@ async function applyActiveScanToUI(activeScan: PersistedActiveScan): Promise<boo
     }
 
     if (activeScan.status === 'FAILED' || activeScan.status === 'CANCELLED') {
-      setError(activeScan.error ?? 'Page scan failed.');
+      setError(activeScan.error ?? 'Page scan failed.', activeScan.errorCode);
       return true;
     }
 
@@ -427,7 +485,7 @@ async function startCurrentPageScan() {
 
   startPopupPolling();
 
-  const result = await sendRuntimeMessage<{ ok: boolean; scan?: ScanResult; error?: string }>({
+  const result = await sendRuntimeMessage<{ ok: boolean; scan?: ScanResult; error?: string; errorCode?: string }>({
     type: 'START_CURRENT_PAGE_SCAN',
     targetUrl,
     pageEvidence: pageEvidence.evidence,
@@ -437,7 +495,7 @@ async function startCurrentPageScan() {
   stopPopupPolling();
 
   if (!result.ok) {
-    setError(result.error ?? 'Scan failed.');
+    setError(result.error ?? 'Scan failed.', result.errorCode);
     return;
   }
 
@@ -514,7 +572,7 @@ async function startWebsiteScan(event?: Event) {
       await restoreScanStateOnOpen();
       return;
     }
-    setError(result.error ?? 'Failed to start website scan.');
+    setError(result.error ?? 'Failed to start website scan.', result.errorCode);
     return;
   }
 
@@ -824,9 +882,16 @@ async function scanAgain() {
  * error must clear the record itself (same as scanAgain() already does from
  * the results view), or the error is permanently sticky across every future
  * popup open until a brand-new scan happens to overwrite it.
+ *
+ * This view is shared by scan failures AND responsive-test failures (both
+ * route through setError()) — clearing only CLEAR_ACTIVE_SCAN would leave a
+ * FAILED activeResponsiveTest record exactly as sticky as the scan bug this
+ * comment describes, so both are cleared here regardless of which one
+ * actually caused the error (clearing the one that didn't is harmless).
  */
 async function dismissError() {
   await sendRuntimeMessage({ type: 'CLEAR_ACTIVE_SCAN' });
+  await sendRuntimeMessage({ type: 'CLEAR_RESPONSIVE_TEST' });
   goHome();
 }
 
@@ -901,7 +966,8 @@ async function loadComponentJobPreview() {
   if (job && isComponentJobInProgress(job.status)) startComponentPolling();
 }
 
-async function startScreenshotToCode() {
+/** Enters "Select Anything" mode on the current tab — the SAME flow whether entered via the "Select Element" card (Explain/Fix/Improve/Make Responsive/Convert.../Recreate Component) or the "Screenshot → Code" card (just a different immediate framing of the same underlying capability). */
+async function startElementSelectionFlow() {
   const health = await checkBackendHealth();
   if (!health.ok) {
     setError(health.message ?? 'Backend unavailable.');
@@ -932,6 +998,378 @@ async function startScreenshotToCode() {
   window.close();
 }
 
+/* ------------------------------------------------------------------------ */
+/* Test Responsive                                                          */
+/* ------------------------------------------------------------------------ */
+
+let currentResponsiveResult: ResponsiveTestResult | null = null;
+let selectedResponsiveIssue: Issue | null = null;
+let responsiveTestToken = 0;
+
+function responsiveWidthLabel(width: number, isLast: boolean): string {
+  return isLast ? 'Desktop' : `${width}px`;
+}
+
+function setLensBanner(id: string, kind: 'active' | 'event' | 'alert', text: string) {
+  const el = document.getElementById(id)!;
+  el.className = `lens-banner ${kind}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+function renderResponsiveProgressList(url: string) {
+  document.getElementById('responsive-progress-url')!.textContent = url;
+  setLensBanner('lens-banner-responsive-progress', 'active', 'Lens Active: Testing responsive layouts…');
+
+  const listEl = document.getElementById('responsive-progress-list')!;
+  listEl.innerHTML = '';
+  const widths = [...DEFAULT_RESPONSIVE_WIDTHS];
+  widths.forEach((width, i) => {
+    const li = document.createElement('li');
+    li.className = 'active';
+    li.innerHTML = `<span class="step-icon"></span>${responsiveWidthLabel(width, i === widths.length - 1)} — Testing…`;
+    listEl.appendChild(li);
+  });
+}
+
+/**
+ * Bugfix: "Test Responsive" used to be a bare in-popup request/response
+ * lasting up to ~130s (six real Playwright viewport renders) with NO
+ * persisted state — Chrome closes an action popup on blur (trivial for a
+ * real user to trigger while waiting), which silently destroyed the whole
+ * in-flight test: reopening showed the plain home view, indistinguishable
+ * from the button doing nothing. The background coordinator
+ * (responsive-test-coordinator.ts) now persists RUNNING/COMPLETED/FAILED/
+ * CANCELLED to chrome.storage.local — this function still awaits the direct
+ * response for the common case (popup stays open), but init()'s
+ * restoreResponsiveTestStateOnOpen + the storage.onChanged listener below
+ * are what make it survive a close/reopen in between.
+ */
+async function startResponsiveTest() {
+  const health = await checkBackendHealth();
+  if (!health.ok) {
+    setError(health.message ?? 'Backend unavailable.');
+    return;
+  }
+
+  const tab = await getActiveTab();
+  if (!tab?.url) {
+    setError('No active tab found.');
+    return;
+  }
+  if (isRestrictedUrl(tab.url)) {
+    setError('Cannot test responsive layouts on restricted Chrome pages. Open a regular webpage.');
+    return;
+  }
+
+  const token = ++responsiveTestToken;
+  const url = tab.url;
+
+  renderResponsiveProgressList(url);
+  showView('responsive-progress');
+
+  const response = await sendRuntimeMessage<ResponsiveTestMessageResponse>({
+    type: 'RUN_RESPONSIVE_TEST',
+    url,
+  });
+
+  // The user backed out or started a different test while this one was in
+  // flight — never clobber whatever view/state they've since moved to. (If
+  // the WHOLE POPUP closed instead, this code never runs at all — recovery
+  // for that case is restoreResponsiveTestStateOnOpen/storage.onChanged.)
+  if (token !== responsiveTestToken) return;
+
+  if (!response.ok || !response.result) {
+    if (response.errorCode === 'CANCELLED') return; // already handled by cancelResponsiveTest's own navigation
+    setLensBanner('lens-banner-responsive-progress', 'alert', 'Lens Alert: Unable to test this page.');
+    setError(response.error ?? 'Responsive test failed.', response.errorCode);
+    return;
+  }
+
+  currentResponsiveResult = response.result;
+  renderResponsiveResults(response.result);
+  showView('responsive-results');
+}
+
+/** "Cancel Test" — actually tells the background to abort the in-flight request (see cancelResponsiveTest in responsive-test-coordinator.ts), not just a local navigation away that leaves an orphaned request running. */
+async function cancelResponsiveTest() {
+  responsiveTestToken++; // invalidate any in-flight request's result in THIS popup instance
+  await sendRuntimeMessage({ type: 'CANCEL_RESPONSIVE_TEST' });
+  goHome();
+}
+
+/** Mirrors applyActiveScanToUI's job for the persisted responsive-test record — called both on popup init (restoreResponsiveTestStateOnOpen) and live, via the storage.onChanged listener in init(), so a test that finishes WHILE the popup happens to be open also updates it immediately. */
+function applyActiveResponsiveTestToUI(test: PersistedResponsiveTest): void {
+  if (test.status === 'RUNNING') {
+    renderResponsiveProgressList(test.url);
+    showView('responsive-progress');
+    return;
+  }
+  if (test.status === 'COMPLETED' && test.result) {
+    currentResponsiveResult = test.result;
+    renderResponsiveResults(test.result);
+    showView('responsive-results');
+    return;
+  }
+  if (test.status === 'FAILED') {
+    setLensBanner('lens-banner-responsive-progress', 'alert', 'Lens Alert: Unable to test this page.');
+    setError(test.error ?? 'Responsive test failed.', test.errorCode);
+  }
+  // CANCELLED: no view change — same as a normal "Cancel Test" click already handled.
+}
+
+async function restoreResponsiveTestStateOnOpen(): Promise<void> {
+  const response = await sendRuntimeMessage<{ activeTest: PersistedResponsiveTest | null }>({ type: 'GET_RESPONSIVE_TEST_STATE' });
+  const activeTest = response.activeTest;
+  if (!activeTest) return;
+
+  // A RUNNING test is worth resuming regardless of which tab is active now
+  // (it keeps running in the background either way) — but a finished result
+  // should only take over the popup's main view when it's for the page
+  // you're currently on, same rule restoreScanStateOnOpen already applies.
+  if (activeTest.status !== 'RUNNING') {
+    const tab = await getActiveTab();
+    if (tab?.url !== activeTest.url) return;
+  }
+
+  applyActiveResponsiveTestToUI(activeTest);
+}
+
+function renderResponsiveResults(result: ResponsiveTestResult) {
+  document.getElementById('responsive-results-url')!.textContent = result.url;
+
+  const totalIssues = result.viewports.reduce((sum, v) => sum + v.issueCount, 0);
+  document.getElementById('responsive-results-summary')!.textContent =
+    totalIssues === 0 ? 'No responsive issues found.' : `${totalIssues} issue${totalIssues === 1 ? '' : 's'} found`;
+
+  setLensBanner(
+    'lens-banner-responsive-results',
+    totalIssues === 0 ? 'event' : 'alert',
+    totalIssues === 0 ? 'Lens Event: Responsive testing completed.' : 'Lens Alert: Responsive issues found.',
+  );
+
+  const listEl = document.getElementById('responsive-viewport-list')!;
+  listEl.innerHTML = '';
+
+  result.viewports.forEach((viewport) => {
+    const li = document.createElement('li');
+    const hasIssues = viewport.issueCount > 0;
+
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'responsive-viewport-row';
+    row.disabled = !hasIssues;
+    row.innerHTML = `
+      <span class="page-status-icon">${hasIssues ? '⚠' : '✓'}</span>
+      <span class="responsive-viewport-label">${escapeHtml(viewport.label)}</span>
+      <span class="responsive-viewport-count ${hasIssues ? 'has-issues' : 'ok'}">${hasIssues ? `${viewport.issueCount} issue${viewport.issueCount === 1 ? '' : 's'}` : 'No issues'}</span>
+    `;
+    li.className = hasIssues ? 'failed' : 'done';
+    li.appendChild(row);
+
+    if (hasIssues) {
+      const issuesEl = document.createElement('div');
+      issuesEl.className = 'responsive-viewport-issues hidden';
+      for (const issue of viewport.issues) {
+        const card = document.createElement('div');
+        card.className = `issue-card ${issue.severity.toLowerCase()}`;
+        card.setAttribute('role', 'button');
+        card.tabIndex = 0;
+        card.innerHTML = `<h4>${escapeHtml(issue.title)}</h4><div class="meta">${issue.severity}</div>`;
+        card.addEventListener('click', () => showResponsiveIssueDetail(viewport, issue));
+        card.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            showResponsiveIssueDetail(viewport, issue);
+          }
+        });
+        issuesEl.appendChild(card);
+      }
+      li.appendChild(issuesEl);
+      row.addEventListener('click', () => issuesEl.classList.toggle('hidden'));
+    }
+
+    listEl.appendChild(li);
+  });
+}
+
+function showResponsiveIssueDetail(viewport: ResponsiveViewportResult, issue: Issue) {
+  selectedResponsiveIssue = issue;
+
+  document.getElementById('responsive-issue-title')!.textContent = issue.title;
+  const severityEl = document.getElementById('responsive-issue-severity')!;
+  severityEl.textContent = issue.severity;
+  severityEl.className = `severity-pill ${issue.severity.toLowerCase()}`;
+  document.getElementById('responsive-issue-viewport')!.textContent = viewport.label;
+  document.getElementById('responsive-issue-problem')!.textContent = issue.problem;
+  document.getElementById('responsive-issue-cause')!.textContent = issue.cause;
+  document.getElementById('responsive-issue-fix')!.textContent = issue.suggestedFix;
+  document.getElementById('responsive-issue-status')!.textContent = '';
+  document.getElementById('responsive-issue-explain-response')!.textContent = '';
+
+  const screenshotEl = document.getElementById('responsive-issue-screenshot') as HTMLImageElement;
+  if (viewport.screenshotBase64) {
+    screenshotEl.src = `data:image/jpeg;base64,${viewport.screenshotBase64}`;
+    screenshotEl.classList.remove('hidden');
+  } else {
+    screenshotEl.classList.add('hidden');
+  }
+
+  const selector = issue.evidence.selector;
+  const selectorCard = document.getElementById('responsive-issue-selector-card')!;
+  const selectBtn = document.getElementById('responsive-issue-select-btn') as HTMLButtonElement;
+  const fixBtn = document.getElementById('responsive-issue-fix-btn') as HTMLButtonElement;
+  if (selector) {
+    document.getElementById('responsive-issue-selector')!.textContent = selector;
+    selectorCard.classList.remove('hidden');
+    selectBtn.disabled = false;
+    fixBtn.disabled = false;
+  } else {
+    selectorCard.classList.add('hidden');
+    selectBtn.disabled = true;
+    fixBtn.disabled = true;
+  }
+
+  showView('responsive-issue-detail');
+}
+
+async function explainResponsiveIssue() {
+  if (!currentResponsiveResult || !selectedResponsiveIssue) return;
+  const responseEl = document.getElementById('responsive-issue-explain-response')!;
+  responseEl.textContent = 'Thinking…';
+
+  try {
+    const response = await fetch(`${API_BASE}/ai/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'Explain this responsive layout issue in detail: why it happens and exactly how to fix it.',
+        url: currentResponsiveResult.url,
+        issue: selectedResponsiveIssue,
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const data = await response.json();
+    responseEl.textContent = data.answer ?? 'AI explanation unavailable.';
+  } catch {
+    responseEl.textContent = 'AI explanation unavailable.';
+  }
+}
+
+async function selectResponsiveIssueElement(autoAction?: 'fix') {
+  const selector = selectedResponsiveIssue?.evidence.selector;
+  const statusEl = document.getElementById('responsive-issue-status')!;
+  if (!selector) return;
+
+  const tab = await getActiveTab();
+  if (!tab?.id) {
+    statusEl.textContent = 'Lens Alert: No active tab found.';
+    return;
+  }
+
+  statusEl.textContent = autoAction
+    ? 'Lens Active: Selecting element and running Fix…'
+    : 'Lens Active: Selecting element on the page…';
+
+  const response = await sendRuntimeMessage<{ success: boolean; error?: string }>({
+    type: 'SELECT_ELEMENT_BY_SELECTOR',
+    tabId: tab.id,
+    selector,
+    autoAction,
+  });
+
+  if (!response.success) {
+    statusEl.textContent = `Lens Alert: ${response.error ?? 'Could not select this element on the page.'}`;
+    return;
+  }
+
+  // Selection (and any auto-triggered action) happens on the page itself,
+  // in the Selected Element panel — get out of the way so the user sees it.
+  window.close();
+}
+
+/* ------------------------------------------------------------------------ */
+/* Report a Bug                                                             */
+/* ------------------------------------------------------------------------ */
+
+let bugReportResultUrl = '';
+
+async function openBugReportForm() {
+  const tab = await getActiveTab();
+  if (!tab?.url) {
+    setError('No active tab found.');
+    return;
+  }
+  if (isRestrictedUrl(tab.url)) {
+    setError('Cannot report a bug on restricted Chrome pages. Open a regular webpage.');
+    return;
+  }
+
+  document.getElementById('bug-report-url')!.textContent = tab.url;
+  (document.getElementById('bug-report-form') as HTMLFormElement).reset();
+  document.getElementById('bug-report-form-error')!.classList.add('hidden');
+  showView('bug-report-form');
+}
+
+async function submitBugReport(e: SubmitEvent) {
+  e.preventDefault();
+  const submitBtn = document.getElementById('bug-report-submit-btn') as HTMLButtonElement;
+  const errorEl = document.getElementById('bug-report-form-error')!;
+  errorEl.classList.add('hidden');
+
+  const tab = await getActiveTab();
+  if (!tab?.id) {
+    setError('No active tab found.');
+    return;
+  }
+
+  const title = (document.getElementById('bug-report-title') as HTMLInputElement).value.trim();
+  const description = (document.getElementById('bug-report-description') as HTMLTextAreaElement).value.trim();
+  if (!title || !description) {
+    errorEl.textContent = 'Title and description are required.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+
+  const steps = (document.getElementById('bug-report-steps') as HTMLTextAreaElement).value
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const form: BugReportFormInput = {
+    title,
+    description,
+    severity: (document.getElementById('bug-report-severity') as HTMLSelectElement).value as Severity,
+    category: (document.getElementById('bug-report-category') as HTMLSelectElement).value as IssueCategory,
+    reproductionSteps: steps,
+    expectedBehavior: (document.getElementById('bug-report-expected') as HTMLInputElement).value.trim() || undefined,
+    actualBehavior: (document.getElementById('bug-report-actual') as HTMLInputElement).value.trim() || undefined,
+  };
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Creating…';
+  try {
+    const response = await sendRuntimeMessage<CreateBugReportMessageResponse>({
+      type: 'CREATE_BUG_REPORT',
+      tabId: tab.id,
+      form,
+    });
+
+    if (!response.ok || !response.result) {
+      errorEl.textContent = `Lens Alert: ${response.error ?? 'Could not create the bug report.'}`;
+      errorEl.classList.remove('hidden');
+      return;
+    }
+
+    bugReportResultUrl = response.result.url;
+    (document.getElementById('bug-report-view-link') as HTMLAnchorElement).href = bugReportResultUrl;
+    showView('bug-report-result');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Create Bug Report';
+  }
+}
+
 async function init() {
   const tab = await getActiveTab();
   if (tab?.url && !isRestrictedUrl(tab.url)) {
@@ -945,24 +1383,54 @@ async function init() {
 
   document.getElementById('current-page-btn')!.addEventListener('click', startCurrentPageScan);
   document.getElementById('website-btn')!.addEventListener('click', showWebsiteConfig);
-  document.getElementById('screenshot-to-code-btn')!.addEventListener('click', startScreenshotToCode);
+  document.getElementById('screenshot-to-code-btn')!.addEventListener('click', startElementSelectionFlow);
+  document.getElementById('select-element-btn')!.addEventListener('click', startElementSelectionFlow);
+  document.getElementById('test-responsive-btn')!.addEventListener('click', () => void startResponsiveTest());
+  document.getElementById('responsive-progress-cancel-btn')!.addEventListener('click', cancelResponsiveTest);
+  document.getElementById('responsive-results-back-btn')!.addEventListener('click', goHome);
+  document.getElementById('responsive-test-again-btn')!.addEventListener('click', () => void startResponsiveTest());
+  document.getElementById('responsive-issue-back-btn')!.addEventListener('click', () => showView('responsive-results'));
+  document.getElementById('responsive-issue-explain-btn')!.addEventListener('click', () => void explainResponsiveIssue());
+  document.getElementById('responsive-issue-select-btn')!.addEventListener('click', () => void selectResponsiveIssueElement());
+  document.getElementById('responsive-issue-fix-btn')!.addEventListener('click', () => void selectResponsiveIssueElement('fix'));
+  document.getElementById('report-bug-btn')!.addEventListener('click', () => void openBugReportForm());
+  document.getElementById('bug-report-back-btn')!.addEventListener('click', goHome);
+  document.getElementById('bug-report-form')!.addEventListener('submit', (e) => void submitBugReport(e));
+  document.getElementById('bug-report-done-btn')!.addEventListener('click', goHome);
   document.getElementById('website-form')!.addEventListener('submit', startWebsiteScan);
   document.getElementById('website-back-btn')!.addEventListener('click', goHome);
   document.getElementById('discovery-method')!.addEventListener('change', toggleManualUrlsField);
   document.getElementById('retry-btn')!.addEventListener('click', () => void dismissError());
   document.getElementById('error-back-btn')!.addEventListener('click', () => void dismissError());
+  // Real <a href target="_blank"> — the click still navigates natively;
+  // this only clears the stuck error state so re-opening the popup later
+  // doesn't show it again (same reason retry-btn/error-back-btn do this).
+  document.getElementById('view-plans-btn')!.addEventListener('click', () => void dismissError());
+  document.getElementById('auth-sign-in-btn')!.addEventListener('click', () => void dismissError());
+  document.getElementById('auth-back-btn')!.addEventListener('click', () => void dismissError());
   document.getElementById('scan-again-btn')!.addEventListener('click', scanAgain);
   document.getElementById('issue-back-btn')!.addEventListener('click', () => showView('results'));
   document.getElementById('ask-btn')!.addEventListener('click', askAi);
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes.activeScan) return;
-    const activeScan = changes.activeScan.newValue as PersistedActiveScan | undefined;
-    if (!activeScan) return;
-    void applyActiveScanToUI(activeScan);
+    if (area !== 'local') return;
+    if (changes.activeScan) {
+      const activeScan = changes.activeScan.newValue as PersistedActiveScan | undefined;
+      if (activeScan) void applyActiveScanToUI(activeScan);
+    }
+    // Live-updates the CURRENTLY OPEN popup the moment a responsive test
+    // finishes in the background — the same mechanism that makes it survive
+    // a close/reopen (see restoreResponsiveTestStateOnOpen) also covers the
+    // "popup stayed open the whole time" case, so both paths go through one
+    // source of truth instead of two.
+    if (changes[RESPONSIVE_TEST_STORAGE_KEY]) {
+      const activeTest = changes[RESPONSIVE_TEST_STORAGE_KEY].newValue as PersistedResponsiveTest | undefined;
+      if (activeTest) applyActiveResponsiveTestToUI(activeTest);
+    }
   });
 
   await restoreScanStateOnOpen();
+  await restoreResponsiveTestStateOnOpen();
   await loadLastScanPreview();
   await loadComponentJobPreview();
 }

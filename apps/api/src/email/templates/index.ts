@@ -19,6 +19,8 @@ import { renderBillingPaymentFailedEmail } from './billing-payment-failed.js';
 import { renderBillingPlanLimitReachedEmail } from './billing-plan-limit-reached.js';
 import { renderBillingSubscriptionCancelledEmail } from './billing-subscription-cancelled.js';
 import { renderBillingPlanExpiringSoonEmail } from './billing-plan-expiring-soon.js';
+import { renderLeadNotificationEmail } from './lead-notification.js';
+import { renderMonitoringRegressionDetectedEmail } from './monitoring-regression-detected.js';
 
 export * from './workspace-invitation.js';
 export * from './password-reset.js';
@@ -36,6 +38,8 @@ export * from './billing-payment-failed.js';
 export * from './billing-plan-limit-reached.js';
 export * from './billing-subscription-cancelled.js';
 export * from './billing-plan-expiring-soon.js';
+export * from './lead-notification.js';
+export * from './monitoring-regression-detected.js';
 
 const SAMPLE_WEB_APP_BASE_URL = 'http://localhost:5173';
 const SAMPLE_EXPIRES_AT = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -114,5 +118,24 @@ export const DEV_EMAIL_PREVIEWS: Record<string, () => { subject: string; html: s
       plan: 'TEAM',
       currentPeriodEnd: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
       webAppBaseUrl: SAMPLE_WEB_APP_BASE_URL,
+    }),
+  'monitoring-regression-detected': () =>
+    renderMonitoringRegressionDetectedEmail({
+      siteName: 'Checkout',
+      siteUrl: 'https://app.customer.com/checkout',
+      eventTitles: ['Health Score dropped 91 → 67', 'New JavaScript error: TypeError: cart is undefined'],
+      webAppBaseUrl: SAMPLE_WEB_APP_BASE_URL,
+      monitoredSiteId: 'sample-monitored-site-id',
+    }),
+  'lead-notification': () =>
+    renderLeadNotificationEmail({
+      name: 'Jordan Smith',
+      email: 'jordan@example.com',
+      company: 'Example Co',
+      message: 'We\'d like help fixing the accessibility issues you found.',
+      domain: 'example.com',
+      scanId: 'sample-scan-id',
+      healthScore: 68,
+      issueSummary: '3 critical, 12 important, 26 improvements',
     }),
 };

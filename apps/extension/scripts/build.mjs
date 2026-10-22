@@ -24,6 +24,8 @@ const buildOptions = {
   entryPoints: {
     'background/service-worker': path.join(import.meta.dirname, '..', 'src/background/service-worker.ts'),
     'content/content-script': path.join(import.meta.dirname, '..', 'src/content/content-script.ts'),
+    'content/page-monitor-main': path.join(import.meta.dirname, '..', 'src/content/page-monitor-main.ts'),
+    'content/bug-report-monitor': path.join(import.meta.dirname, '..', 'src/content/bug-report-monitor.ts'),
     'popup/popup': path.join(import.meta.dirname, '..', 'src/popup/popup.ts'),
   },
   bundle: true,

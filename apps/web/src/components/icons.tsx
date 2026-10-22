@@ -53,6 +53,16 @@ export function ChartIcon() {
   return <StrokeIcon><path d="M4 20V10M12 20V4M20 20v-7" /></StrokeIcon>;
 }
 
+/** Persona onboarding — Founder card. */
+export function RocketIcon() {
+  return <StrokeIcon><path d="M12 2.5c3 1.8 5 5.4 5 9.2 0 2-1 4.3-2.4 5.9L12 21l-2.6-3.4C8 16 7 13.7 7 11.7c0-3.8 2-7.4 5-9.2Z" /><circle cx="12" cy="10.5" r="1.8" /><path d="M8.2 15.5 5.5 17 6 13.8M15.8 15.5l2.7 1.5-.5-3.2" /></StrokeIcon>;
+}
+
+/** Persona onboarding — Designer card. */
+export function PaletteIcon() {
+  return <StrokeIcon><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.8-.9 1.8-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.7 1.8-1.7H16a4 4 0 0 0 4-4c0-4.4-3.6-8.1-8-8.1Z" /><circle cx="7.5" cy="11" r="1" fill="currentColor" stroke="none" /><circle cx="9.5" cy="7.2" r="1" fill="currentColor" stroke="none" /><circle cx="14.5" cy="7.2" r="1" fill="currentColor" stroke="none" /></StrokeIcon>;
+}
+
 /** Issue Detail redesign — Suggested Fix card icon. */
 export function WrenchIcon() {
   return <StrokeIcon><path d="M14.7 6.3a4 4 0 0 0-5.4 4.6L4 16.2V20h3.8l5.3-5.3a4 4 0 0 0 4.6-5.4l-2.6 2.6-2.1-2.1 2.6-2.6Z" /></StrokeIcon>;
@@ -123,6 +133,10 @@ export function TagIcon() {
 
 export function ShieldIcon() {
   return <StrokeIcon size={16}><path d="M12 3.5 19.5 6.5V11c0 5-3.5 8.2-7.5 9.5C8 19.2 4.5 16 4.5 11V6.5Z" /><path d="m9 12 2 2 4-4.5" /></StrokeIcon>;
+}
+
+export function ForkIcon() {
+  return <StrokeIcon size={16}><circle cx="7" cy="5.5" r="2.25" /><circle cx="17" cy="5.5" r="2.25" /><circle cx="12" cy="18.5" r="2.25" /><path d="M7 7.75v2A3.25 3.25 0 0 0 10.25 13h3.5A3.25 3.25 0 0 0 17 9.75v-2M12 13v3.25" /></StrokeIcon>;
 }
 
 export function ChevronDownIcon() {

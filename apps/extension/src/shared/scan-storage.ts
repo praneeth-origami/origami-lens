@@ -20,6 +20,8 @@ export interface PersistedActiveScan {
   startedAt: string;
   updatedAt: string;
   error?: string;
+  /** The API's `errorCode` field (e.g. `USAGE_LIMIT_EXCEEDED`), when the failure came from a real API response — lets the popup show an accurate, reason-specific message instead of always falling back to a generic "something went wrong" (see popup.ts's friendlyError). Absent for non-API failures (network errors, restricted pages, etc.), which have no such code. */
+  errorCode?: string;
   healthScore?: number;
   totalIssues?: number;
   /** Consecutive failed status-poll attempts (network error or non-2xx response) — see scan-coordinator.ts's refreshActiveScanFromBackend. Resets to 0 on any successful poll. Bounds how long a scan can appear to be "still running" when the backend is actually unreachable or erroring, instead of polling silently forever. */

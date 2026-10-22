@@ -60,14 +60,14 @@ function drawSectionDivider(doc: PDFKit.PDFDocument): void {
   doc.moveDown(0.75);
 }
 
-function drawCategoryBar(doc: PDFKit.PDFDocument, label: string, score: number): void {
+function drawCategoryBar(doc: PDFKit.PDFDocument, label: string, score: number, accentColor: string): void {
   const barY = doc.y;
   doc.fontSize(10).fillColor(BRAND.text).font('Helvetica-Bold').text(label, MARGIN, barY, { continued: false, width: 160 });
   const trackX = MARGIN + 170;
   const trackWidth = CONTENT_WIDTH - 170 - 40;
   doc.roundedRect(trackX, barY + 1, trackWidth, 8, 4).fillColor(BRAND.background).fill();
   const fillWidth = Math.max(4, (Math.min(100, Math.max(0, score)) / 100) * trackWidth);
-  doc.roundedRect(trackX, barY + 1, fillWidth, 8, 4).fillColor(BRAND.primary).fill();
+  doc.roundedRect(trackX, barY + 1, fillWidth, 8, 4).fillColor(accentColor).fill();
   doc.fontSize(10).fillColor(BRAND.text).font('Helvetica-Bold').text(String(Math.round(score)), trackX + trackWidth + 10, barY, { width: 30 });
   doc.moveDown(1.1);
 }
@@ -79,17 +79,39 @@ function drawFooter(doc: PDFKit.PDFDocument, report: LensReport, pageNumber: num
     .text(`Page ${pageNumber} of ${pageCount}`, PAGE_WIDTH - MARGIN - 100, footerY, { width: 100, align: 'right', lineBreak: false });
 }
 
-export async function renderReportPdf(report: LensReport): Promise<Buffer> {
+export interface ReportPdfScreenshots {
+  /** Raw JPEG bytes (read via ArtifactStore by the caller) — a PDF is a static document, so unlike the live web report it can't reference a screenshot by URL; this is the one place this renderer needs actual image bytes rather than a reference. */
+  desktop?: Buffer;
+  mobile?: Buffer;
+}
+
+/**
+ * Agency plan (V4) white-label branding — `report.branding.displayName`/
+ * `primaryColor` are already plain data on the report, but a PDF can't
+ * reference the agency's logo by URL the way the live web report can (same
+ * reasoning as ReportPdfScreenshots above), so the caller reads its actual
+ * bytes via ArtifactStore and passes them here. Falls back to Origami
+ * Lens's own hardcoded logo/name/primary color when absent (every
+ * non-Agency report, or an Agency report with no logo uploaded yet) —
+ * existing behavior is byte-for-byte unchanged in that case.
+ */
+export interface ReportPdfBrandingAssets {
+  logo?: Buffer;
+}
+
+export async function renderReportPdf(report: LensReport, screenshots?: ReportPdfScreenshots, brandingAssets?: ReportPdfBrandingAssets): Promise<Buffer> {
   const doc = new PDFDocument({ size: 'LETTER', margin: MARGIN, bufferPages: true });
   const chunks: Buffer[] = [];
   doc.on('data', (chunk: Buffer) => chunks.push(chunk));
   const done = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
 
-  const logo = await loadLogo();
+  const logo = brandingAssets?.logo ?? await loadLogo();
+  const brandName = report.branding?.displayName?.toUpperCase() ?? 'ORIGAMI LENS';
+  const brandPrimary = report.branding?.primaryColor ?? BRAND.primary;
 
   // ---- Cover section -----------------------------------------------------
   if (logo) doc.image(logo, MARGIN, MARGIN, { width: 32 });
-  doc.fontSize(11).fillColor(BRAND.primary).font('Helvetica-Bold').text('ORIGAMI LENS', logo ? MARGIN + 42 : MARGIN, MARGIN + 6);
+  doc.fontSize(11).fillColor(brandPrimary).font('Helvetica-Bold').text(brandName, logo ? MARGIN + 42 : MARGIN, MARGIN + 6);
   doc.moveDown(1.4);
   doc.fontSize(20).fillColor(BRAND.text).font('Helvetica-Bold').text('Website Health Report');
   doc.moveDown(0.3);
@@ -109,7 +131,7 @@ export async function renderReportPdf(report: LensReport): Promise<Buffer> {
     // ---- Health score ------------------------------------------------
     doc.fontSize(13).fillColor(BRAND.text).font('Helvetica-Bold').text('HEALTH SCORE');
     doc.moveDown(0.4);
-    doc.fontSize(36).fillColor(BRAND.primary).font('Helvetica-Bold').text(`${report.healthScore} / 100`);
+    doc.fontSize(36).fillColor(brandPrimary).font('Helvetica-Bold').text(`${report.healthScore} / 100`);
     drawSectionDivider(doc);
 
     // ---- Category scores ----------------------------------------------
@@ -117,7 +139,7 @@ export async function renderReportPdf(report: LensReport): Promise<Buffer> {
     doc.moveDown(0.6);
     if (report.categories) {
       for (const [key, score] of Object.entries(report.categories) as [IssueCategory, number][]) {
-        drawCategoryBar(doc, CATEGORY_LABEL[key], score);
+        drawCategoryBar(doc, CATEGORY_LABEL[key], score, brandPrimary);
       }
     }
     drawSectionDivider(doc);
@@ -128,17 +150,33 @@ export async function renderReportPdf(report: LensReport): Promise<Buffer> {
     const summaryY = doc.y;
     const summaryItems: [string, number, string][] = [
       ['Critical', report.summary.critical, BRAND.critical],
-      ['High', report.summary.high, BRAND.high],
-      ['Medium', report.summary.medium, BRAND.medium],
-      ['Low', report.summary.low, BRAND.low],
+      ['Important', report.summary.important, BRAND.high],
+      ['Improvements', report.summary.improvements, BRAND.low],
     ];
     summaryItems.forEach(([label, count, color], i) => {
-      const x = MARGIN + i * (CONTENT_WIDTH / 4);
+      const x = MARGIN + i * (CONTENT_WIDTH / 3);
       doc.circle(x + 5, summaryY + 5, 4).fillColor(color).fill();
-      doc.fontSize(11).fillColor(BRAND.text).font('Helvetica-Bold').text(`${count} ${label}`, x + 14, summaryY, { width: CONTENT_WIDTH / 4 - 14 });
+      doc.fontSize(11).fillColor(BRAND.text).font('Helvetica-Bold').text(`${count} ${label}`, x + 14, summaryY, { width: CONTENT_WIDTH / 3 - 14 });
     });
     doc.y = summaryY + 24;
     drawSectionDivider(doc);
+
+    // ---- Screenshot ---------------------------------------------------
+    if (screenshots?.desktop) {
+      doc.fontSize(13).fillColor(BRAND.text).font('Helvetica-Bold').text('SCREENSHOT');
+      doc.moveDown(0.5);
+      try {
+        const imageTop = doc.y;
+        doc.image(screenshots.desktop, MARGIN, imageTop, { fit: [CONTENT_WIDTH, 320] });
+        // pdfkit's image() does not advance doc.y like text() does — advance
+        // by the fit box's max height (a safe upper bound on the actual
+        // scaled-to-aspect-ratio height) so later content never overlaps it.
+        doc.y = imageTop + 320 + 10;
+      } catch (error) {
+        console.error('[report-pdf-renderer] Could not embed desktop screenshot:', error instanceof Error ? error.message : error);
+      }
+      drawSectionDivider(doc);
+    }
 
     // ---- Issues -----------------------------------------------------------
     doc.fontSize(13).fillColor(BRAND.text).font('Helvetica-Bold').text('ISSUES');

@@ -186,6 +186,65 @@ describeIfDb('OrganizationRepository — Phase 18 membership management (real Po
     assert.ok(found);
     assert.equal(found?.name, org.name);
   });
+
+  it('countInternalMembers excludes CLIENT_VIEWER but countMembers includes everyone (Agency bugfix: client viewers never consume an internal seat)', async () => {
+    const owner = await createRealUser('seat-count-owner');
+    const internalMember = await createRealUser('seat-count-internal');
+    const clientViewer = await createRealUser('seat-count-client-viewer');
+    const orgRepo = new OrganizationRepository();
+    const org = await orgRepo.getOrCreatePersonalOrganization(owner.id, 'seat-count-owner');
+    await orgRepo.addMember(org.id, internalMember.id, 'MEMBER');
+    await orgRepo.addMember(org.id, clientViewer.id, 'CLIENT_VIEWER');
+
+    assert.equal(await orgRepo.countMembers(org.id), 3);
+    assert.equal(await orgRepo.countInternalMembers(org.id), 2);
+  });
+
+  it('createClientWorkspace (Agency plan) creates a NEW, non-personal organization owned by the creator, linked to the agency', async () => {
+    const agencyOwner = await createRealUser('client-ws-agency-owner');
+    const orgRepo = new OrganizationRepository();
+    const agencyOrg = await orgRepo.getOrCreatePersonalOrganization(agencyOwner.id, 'client-ws-agency-owner');
+
+    const client = await orgRepo.createClientWorkspace(agencyOrg.id, agencyOwner.id, 'Acme Client');
+
+    assert.equal(client.name, 'Acme Client');
+    assert.equal(client.parentOrganizationId, agencyOrg.id);
+    assert.notEqual(client.id, agencyOrg.id);
+    assert.equal(await orgRepo.getMembershipRole(client.id, agencyOwner.id), 'OWNER');
+  });
+
+  it('listClientWorkspacesForAgency lists only THIS agency\'s own client workspaces, with a live member count', async () => {
+    const agencyOwner = await createRealUser('client-ws-list-owner');
+    const otherAgencyOwner = await createRealUser('client-ws-other-agency-owner');
+    const orgRepo = new OrganizationRepository();
+    const agencyOrg = await orgRepo.getOrCreatePersonalOrganization(agencyOwner.id, 'client-ws-list-owner');
+    const otherAgencyOrg = await orgRepo.getOrCreatePersonalOrganization(otherAgencyOwner.id, 'client-ws-other-agency-owner');
+
+    const clientA = await orgRepo.createClientWorkspace(agencyOrg.id, agencyOwner.id, 'Client A');
+    await orgRepo.createClientWorkspace(otherAgencyOrg.id, otherAgencyOwner.id, 'Someone Else\'s Client');
+
+    const staffer = await createRealUser('client-ws-list-staffer');
+    await orgRepo.addMember(clientA.id, staffer.id, 'ADMIN');
+
+    const clients = await orgRepo.listClientWorkspacesForAgency(agencyOrg.id);
+    assert.equal(clients.length, 1);
+    assert.equal(clients[0].organizationId, clientA.id);
+    assert.equal(clients[0].name, 'Client A');
+    assert.equal(clients[0].memberCount, 2); // the agency owner (OWNER) + the invited staffer (ADMIN)
+  });
+
+  it('isClientWorkspaceOfAgency correctly distinguishes a real parent/child relationship from an unrelated organization', async () => {
+    const agencyOwner = await createRealUser('client-ws-check-owner');
+    const unrelatedOwner = await createRealUser('client-ws-check-unrelated');
+    const orgRepo = new OrganizationRepository();
+    const agencyOrg = await orgRepo.getOrCreatePersonalOrganization(agencyOwner.id, 'client-ws-check-owner');
+    const unrelatedOrg = await orgRepo.getOrCreatePersonalOrganization(unrelatedOwner.id, 'client-ws-check-unrelated');
+    const client = await orgRepo.createClientWorkspace(agencyOrg.id, agencyOwner.id, 'Real Client');
+
+    assert.equal(await orgRepo.isClientWorkspaceOfAgency(client.id, agencyOrg.id), true);
+    assert.equal(await orgRepo.isClientWorkspaceOfAgency(client.id, unrelatedOrg.id), false);
+    assert.equal(await orgRepo.isClientWorkspaceOfAgency(unrelatedOrg.id, agencyOrg.id), false);
+  });
 });
 
 describe('OrganizationRepository.isEnabled()', () => {

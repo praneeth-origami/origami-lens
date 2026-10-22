@@ -1,4 +1,4 @@
-import { parseAndExtract } from './repository-ast.js';
+import { parseAndExtract, type SyntaxErrorLocation } from './repository-ast.js';
 import { GRAMMAR_WASM_FILE, type DetectedLanguage } from './repository-language.js';
 import type { RepositoryFixSyntaxStatus } from '@origami/contracts';
 
@@ -176,4 +176,25 @@ export async function validateSyntax(language: string, content: string): Promise
   const result = await parseAndExtract(language as DetectedLanguage, content);
   if (!result) return 'UNSUPPORTED';
   return result.hasSyntaxError ? 'INVALID' : 'VALID';
+}
+
+export interface SyntaxValidationResult {
+  status: RepositoryFixSyntaxStatus;
+  /** The actual Tree-sitter error-recovery location (line/column/message) — set only when status is INVALID. Never a fabricated compiler-style diagnostic; only what the real parser actually reported. */
+  errorDetail?: SyntaxErrorLocation;
+}
+
+/**
+ * Same verdict as validateSyntax (kept separate so validateSyntax's own
+ * signature/behavior stays completely unchanged for its existing callers),
+ * but also returns the real parser's first error location when INVALID —
+ * so a caller can report WHERE and WHY a proposed fix failed validation,
+ * not just that it did.
+ */
+export async function validateSyntaxDetailed(language: string, content: string): Promise<SyntaxValidationResult> {
+  if (!PARSEABLE_LANGUAGES.has(language)) return { status: 'UNSUPPORTED' };
+  const result = await parseAndExtract(language as DetectedLanguage, content);
+  if (!result) return { status: 'UNSUPPORTED' };
+  if (!result.hasSyntaxError) return { status: 'VALID' };
+  return { status: 'INVALID', errorDetail: result.syntaxErrorLocation };
 }

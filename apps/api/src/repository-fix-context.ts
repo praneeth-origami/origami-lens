@@ -1,5 +1,7 @@
+import type { IssueEvidence } from '@origami/contracts';
 import { scrubString } from '@origami/privacy';
 import { buildRepositoryQaContext, type RepositoryContextChunk } from './repository-ai-context.js';
+import { evidenceTokensForQuery, extractEvidenceTokens } from './repository-finding-evidence.js';
 
 function envInt(name: string, defaultValue: number, minValue = 1): number {
   const raw = process.env[name];
@@ -44,6 +46,19 @@ export function summarizeFindingEvidence(evidence: Record<string, unknown> | und
   if (typeof evidence.value === 'string') parts.push(`value: ${evidence.value}`);
   if (typeof evidence.metric === 'string') parts.push(`metric: ${evidence.metric}${evidence.metricValue !== undefined ? ` = ${evidence.metricValue}` : ''}`);
   if (typeof evidence.count === 'number') parts.push(`count: ${evidence.count}`);
+  // The ONLY place axe-core violation evidence (real CSS selector + real
+  // outerHTML snippet) lives — normalizeAxeViolations never sets a
+  // top-level selector/snippet for an accessibility finding (see
+  // packages/rules/src/index.ts). Without this, the LLM never sees which
+  // concrete element an accessibility finding was even about.
+  if (Array.isArray(evidence.items)) {
+    for (const [i, raw] of (evidence.items as Array<Record<string, unknown>>).slice(0, 3).entries()) {
+      const itemParts: string[] = [];
+      if (typeof raw?.selector === 'string' && raw.selector) itemParts.push(`selector: ${raw.selector}`);
+      if (typeof raw?.snippet === 'string' && raw.snippet) itemParts.push(`html: ${raw.snippet}`);
+      if (itemParts.length > 0) parts.push(`element ${i + 1} — ${itemParts.join(', ')}`);
+    }
+  }
   const joined = parts.length > 0 ? parts.join('\n') : '(no structured evidence fields)';
   const bounded = joined.length > AI_FINDING_EVIDENCE_MAX_CHARS ? `${joined.slice(0, AI_FINDING_EVIDENCE_MAX_CHARS)}…` : joined;
   return scrubString(bounded);
@@ -91,16 +106,22 @@ const MAX_QUERY_LENGTH = 300;
 
 /**
  * Deterministic finding -> search-query construction (never the entire scan
- * payload) — combines only the fields most likely to locate the relevant
- * code: title, category, and (if present) the CSS selector and short
- * evidence message. Bounded to MAX_QUERY_LENGTH, well under
+ * payload) — combines the fields most likely to locate the relevant code:
+ * title, category, the top-level CSS selector and evidence message, plus
+ * concrete DOM-evidence tokens (class names, tag, id, data-testid, visible
+ * text) extracted from the finding's evidence — including nested
+ * `items[]`, the only place axe-core violation evidence lives (see
+ * repository-finding-evidence.ts). Bounded to MAX_QUERY_LENGTH, well under
  * REPOSITORY_SEARCH_MAX_QUERY_LENGTH's own ceiling (500) so the query is
- * never rejected by the reused search service for being too long.
+ * never rejected by the reused search service for being too long. Still
+ * never includes a raw snippet/HTML blob verbatim — only short, discrete
+ * tokens parsed out of it.
  */
-export function buildFindingSearchQuery(finding: { title: string; category: string; evidence?: { selector?: string; message?: string } }): string {
-  const parts = [finding.title, finding.category, finding.evidence?.selector, finding.evidence?.message]
+export function buildFindingSearchQuery(finding: { title: string; category: string; evidence?: IssueEvidence }): string {
+  const evidenceTokens = extractEvidenceTokens(finding.evidence);
+  const parts = [finding.title, finding.category, finding.evidence?.selector, finding.evidence?.message, ...evidenceTokensForQuery(evidenceTokens)]
     .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
     .map((p) => p.trim());
-  const query = parts.join(' ');
+  const query = [...new Set(parts)].join(' ');
   return query.length > MAX_QUERY_LENGTH ? query.slice(0, MAX_QUERY_LENGTH) : query;
 }
