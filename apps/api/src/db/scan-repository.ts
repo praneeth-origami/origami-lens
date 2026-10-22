@@ -1,9 +1,11 @@
 import type {
   AggregatedIssue,
   AiScanSummary,
+  BrowserEvidence,
   DiscoveryMethod,
   EvidenceSummary,
   FailedPageRecord,
+  GitHubIssueLink,
   Issue,
   IssueOccurrence,
   IssueStatus,
@@ -31,6 +33,8 @@ interface CreateScanInput {
   discoveryMethod?: DiscoveryMethod;
   maxPages?: number;
   status?: ScanStatus;
+  /** Set only when this scan was created BY continuous monitoring (scheduled or manual "Run Now"), never by an ordinary one-off scan — see migration 041 and monitored-site-service.ts. */
+  monitoredSiteId?: string;
 }
 
 export class ScanRepository {
@@ -43,8 +47,8 @@ export class ScanRepository {
     if (!pool) throw new Error('Database not configured');
 
     await pool.query(
-      `INSERT INTO scans (id, scan_type, status, root_url, owner_id, organization_id, discovery_method, max_pages, progress_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO scans (id, scan_type, status, root_url, owner_id, organization_id, discovery_method, max_pages, progress_json, monitored_site_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         input.scanId,
         input.scanType,
@@ -55,8 +59,46 @@ export class ScanRepository {
         input.discoveryMethod ?? null,
         input.maxPages ?? null,
         JSON.stringify({ discoveredPages: 0, completedPages: 0, failedPages: 0, issuesFound: 0 }),
+        input.monitoredSiteId ?? null,
       ],
     );
+  }
+
+  /** Scan history for a monitored site (newest first) — the existing `scans` table is the sole source of truth (migration 041), so this is a plain filtered read, never a second scan-data store. */
+  async listScansForMonitoredSite(monitoredSiteId: string, limit = 30): Promise<ScanResponse[]> {
+    const pool = getPool();
+    if (!pool) return [];
+    const result = await pool.query(`SELECT id FROM scans WHERE monitored_site_id = $1 ORDER BY created_at DESC LIMIT $2`, [monitoredSiteId, limit]);
+    const scans: ScanResponse[] = [];
+    for (const row of result.rows) {
+      const scan = await this.getScan(row.id);
+      if (scan) scans.push(scan);
+    }
+    return scans;
+  }
+
+  /** The most recently COMPLETED (or COMPLETED_WITH_WARNINGS) scan for a monitored site before the given one — the day-over-day regression comparison point, distinct from the site's frozen baseline_scan_id (see migration 041's doc comment). */
+  async getPreviousCompletedScanForMonitoredSite(monitoredSiteId: string, beforeScanId: string): Promise<ScanResponse | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+    const beforeRow = await pool.query(`SELECT created_at FROM scans WHERE id = $1`, [beforeScanId]);
+    if (beforeRow.rows.length === 0) return undefined;
+    const result = await pool.query(
+      `SELECT id FROM scans
+       WHERE monitored_site_id = $1 AND id != $2 AND created_at < $3 AND status IN ('COMPLETED', 'COMPLETED_WITH_WARNINGS')
+       ORDER BY created_at DESC LIMIT 1`,
+      [monitoredSiteId, beforeScanId, beforeRow.rows[0].created_at],
+    );
+    if (result.rows.length === 0) return undefined;
+    return this.getScan(result.rows[0].id);
+  }
+
+  /** Is a scan already in flight for this monitored site — the server-side duplicate-concurrent-run guard (manual "Run Now" and the scheduler sweep both check this before enqueueing), reusing the same scans.status column the admin activity dashboard already reads rather than a new marker column. */
+  async hasActiveScanForMonitoredSite(monitoredSiteId: string): Promise<boolean> {
+    const pool = getPool();
+    if (!pool) return false;
+    const result = await pool.query(`SELECT 1 FROM scans WHERE monitored_site_id = $1 AND status IN ('QUEUED', 'RUNNING') LIMIT 1`, [monitoredSiteId]);
+    return result.rows.length > 0;
   }
 
   async updateScanStatus(scanId: string, status: ScanStatus, error?: string): Promise<void> {
@@ -130,6 +172,8 @@ export class ScanRepository {
       error?: string;
       healthScore?: object;
       evidenceSummary?: EvidenceSummary;
+      /** Already privacy-scrubbed/screenshot-stripped (page-scan-runner.ts's PageScanResult.evidence) — persisted verbatim for "Ask About This Page" (page-qa-service.ts), never re-sanitized here. */
+      fullEvidence?: BrowserEvidence;
       artifacts?: ScanArtifacts;
       scannedAt?: string;
     },
@@ -139,7 +183,7 @@ export class ScanRepository {
 
     await pool.query(
       `UPDATE page_scans SET status = $2, error = $3, health_score_json = $4,
-       evidence_summary_json = $5, artifacts_json = $6, scanned_at = $7
+       evidence_summary_json = $5, artifacts_json = $6, scanned_at = $7, full_evidence_json = $8
        WHERE id = $1`,
       [
         pageScanId,
@@ -149,6 +193,7 @@ export class ScanRepository {
         data.evidenceSummary ? JSON.stringify(data.evidenceSummary) : null,
         data.artifacts ? JSON.stringify(data.artifacts) : null,
         data.scannedAt ?? null,
+        data.fullEvidence ? JSON.stringify(data.fullEvidence) : null,
       ],
     );
   }
@@ -261,14 +306,15 @@ export class ScanRepository {
     );
   }
 
-  async saveCurrentPageScan(response: ScanResponse): Promise<void> {
+  /** `fullEvidence` is already privacy-scrubbed/screenshot-stripped (page-scan-runner.ts's PageScanResult.evidence) — kept as a separate param rather than a ScanResponse field so the (potentially large) evidence blob never rides along on the public scan-fetch contract; persisted verbatim for "Ask About This Page" (page-qa-service.ts). */
+  async saveCurrentPageScan(response: ScanResponse, fullEvidence?: BrowserEvidence): Promise<void> {
     const pool = getPool();
     if (!pool) return;
 
     await pool.query(
       `INSERT INTO scans (id, scan_type, status, root_url, owner_id, organization_id, progress_json, health_score_json,
-       summary_json, ai_summary_json, evidence_summary_json, artifacts_json, scanned_at)
-       VALUES ($1, 'CURRENT_PAGE', 'COMPLETED', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       summary_json, ai_summary_json, evidence_summary_json, artifacts_json, scanned_at, full_evidence_json)
+       VALUES ($1, 'CURRENT_PAGE', 'COMPLETED', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (id) DO UPDATE SET
          health_score_json = EXCLUDED.health_score_json,
          summary_json = EXCLUDED.summary_json,
@@ -276,6 +322,7 @@ export class ScanRepository {
          evidence_summary_json = EXCLUDED.evidence_summary_json,
          artifacts_json = EXCLUDED.artifacts_json,
          scanned_at = EXCLUDED.scanned_at,
+         full_evidence_json = EXCLUDED.full_evidence_json,
          updated_at = NOW()`,
       [
         response.scanId,
@@ -289,6 +336,7 @@ export class ScanRepository {
         response.evidenceSummary ? JSON.stringify(response.evidenceSummary) : null,
         response.artifacts ? JSON.stringify(response.artifacts) : null,
         response.scannedAt,
+        fullEvidence ? JSON.stringify(fullEvidence) : null,
       ],
     );
 
@@ -561,6 +609,136 @@ export class ScanRepository {
     return this.getPageScanDetail(scanId, pageScanId);
   }
 
+  /**
+   * Narrow accessor used only by "Ask About This Page" (page-qa-service.ts)
+   * for a CURRENT_PAGE scan — never by the general scan-fetch routes, so the
+   * (potentially large) full_evidence_json blob is never loaded on every
+   * ordinary scan-detail view. `fullEvidence` is undefined for a scan that
+   * predates migration 036 (never backfilled) or wasn't a CURRENT_PAGE scan.
+   */
+  async getScanEvidenceForOrganizations(scanId: string, organizationIds: string[]): Promise<{
+    scanId: string;
+    url: string;
+    scanType: ScanType;
+    status: ScanStatus;
+    healthScore?: object;
+    fullEvidence?: BrowserEvidence;
+    issues: Issue[];
+    issueCount: number;
+  } | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const result = await pool.query(
+      `SELECT s.id, s.root_url, s.scan_type, s.status, s.health_score_json, s.full_evidence_json
+       FROM scans s WHERE s.id = $1 AND s.organization_id = ANY($2::uuid[])`,
+      [scanId, organizationIds],
+    );
+    if (result.rows.length === 0) return undefined;
+
+    const row = result.rows[0];
+    const { issues, issueCount } = await this.loadIssuesForQa('scan_id', scanId);
+    return {
+      scanId: row.id,
+      url: row.root_url,
+      scanType: row.scan_type,
+      status: row.status,
+      healthScore: row.health_score_json ?? undefined,
+      fullEvidence: row.full_evidence_json ?? undefined,
+      issues,
+      issueCount,
+    };
+  }
+
+  /**
+   * The root page of a WEBSITE scan (the first page_scan row created —
+   * discoverPages always seeds the root URL first, see
+   * website-scan-orchestrator.ts) — used only by the continuous-monitoring
+   * regression engine, which already trusts the scanId it's given (it
+   * created that scan itself), so this deliberately skips the
+   * organization-ownership re-check every caller-facing accessor above
+   * does. The returned `pageScanId` composite id (`${scanId}/${pageScanId}`)
+   * is the exact key ArtifactStore/PageScanRunner already use for a
+   * website page's own screenshots — see persistArtifacts in
+   * page-scan-runner.ts.
+   */
+  async getRootPageScanData(scanId: string): Promise<{ pageScanId: string; url: string; fullEvidence?: BrowserEvidence; artifacts?: ScanArtifacts } | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+    const result = await pool.query(
+      `SELECT id, url, full_evidence_json, artifacts_json FROM page_scans WHERE scan_id = $1 ORDER BY created_at ASC LIMIT 1`,
+      [scanId],
+    );
+    if (result.rows.length === 0) return undefined;
+    const row = result.rows[0];
+    return {
+      pageScanId: row.id,
+      url: row.url,
+      fullEvidence: row.full_evidence_json ?? undefined,
+      artifacts: row.artifacts_json ?? undefined,
+    };
+  }
+
+  /** Same posture as getScanEvidenceForOrganizations above, for a WEBSITE scan's individual page_scans row. */
+  async getPageScanEvidenceForOrganizations(scanId: string, pageScanId: string, organizationIds: string[]): Promise<{
+    pageScanId: string;
+    url: string;
+    status: ScanStatus;
+    healthScore?: object;
+    fullEvidence?: BrowserEvidence;
+    issues: Issue[];
+    issueCount: number;
+  } | undefined> {
+    if (organizationIds.length === 0) return undefined;
+    const pool = getPool();
+    if (!pool) return undefined;
+
+    const owned = await pool.query(`SELECT id FROM scans WHERE id = $1 AND organization_id = ANY($2::uuid[])`, [scanId, organizationIds]);
+    if (owned.rows.length === 0) return undefined;
+
+    const result = await pool.query(
+      `SELECT ps.id, ps.url, ps.status, ps.health_score_json, ps.full_evidence_json
+       FROM page_scans ps WHERE ps.id = $1 AND ps.scan_id = $2`,
+      [pageScanId, scanId],
+    );
+    if (result.rows.length === 0) return undefined;
+
+    const row = result.rows[0];
+    const { issues, issueCount } = await this.loadIssuesForQa('page_scan_id', pageScanId);
+    return {
+      pageScanId: row.id,
+      url: row.url,
+      status: row.status,
+      healthScore: row.health_score_json ?? undefined,
+      fullEvidence: row.full_evidence_json ?? undefined,
+      issues,
+      issueCount,
+    };
+  }
+
+  /**
+   * Used only by "Ask About This Page" (page-qa-service.ts) — returns the
+   * total issue count plus a severity-ordered, bounded sample (never
+   * unbounded: page-qa-context.ts further caps how many it actually uses,
+   * but this keeps the DB round trip itself bounded regardless).
+   */
+  private async loadIssuesForQa(column: 'scan_id' | 'page_scan_id', id: string): Promise<{ issues: Issue[]; issueCount: number }> {
+    const pool = getPool();
+    if (!pool) return { issues: [], issueCount: 0 };
+
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS count FROM issues WHERE ${column} = $1`, [id]);
+    const issueCount = countResult.rows[0]?.count ?? 0;
+
+    const result = await pool.query(
+      `SELECT * FROM issues WHERE ${column} = $1
+       ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END
+       LIMIT 50`,
+      [id],
+    );
+    return { issues: result.rows.map((r) => this.rowToIssue(r)), issueCount };
+  }
+
   async getIssue(issueId: string): Promise<{ issue: Issue | AggregatedIssue; scan: ScanResponse } | undefined> {
     const pool = getPool();
     if (!pool) return undefined;
@@ -571,6 +749,7 @@ export class ScanRepository {
     const issueRow = issueResult.rows[0];
     const scan = await this.getScan(issueRow.scan_id);
     if (!scan) return undefined;
+    const githubIssueLinks = await this.loadGitHubIssueLinks(issueId);
 
     if (issueRow.is_aggregated) {
       const occResult = await pool.query(
@@ -587,11 +766,12 @@ export class ScanRepository {
           evidence: r.evidence_json,
         })) as IssueOccurrence[],
         isAggregated: true,
+        githubIssueLinks,
       };
       return { issue: aggregated, scan };
     }
 
-    return { issue: this.rowToIssue(issueRow), scan };
+    return { issue: { ...this.rowToIssue(issueRow), githubIssueLinks }, scan };
   }
 
   /** The authorization-aware lookup — an issue belongs to whichever scan found it, so ownership is checked via that scan's organization_id. Returns undefined for "doesn't exist" and "exists but isn't yours" identically. */
@@ -639,6 +819,73 @@ export class ScanRepository {
     );
     if (result.rows.length === 0) return undefined;
     return this.rowToIssue(result.rows[0]);
+  }
+
+  private async loadGitHubIssueLinks(issueId: string): Promise<GitHubIssueLink[]> {
+    const pool = getPool();
+    if (!pool) return [];
+    const result = await pool.query(`SELECT * FROM github_issue_links WHERE issue_id = $1 ORDER BY created_at`, [issueId]);
+    return result.rows.map((r) => this.rowToGitHubIssueLink(r));
+  }
+
+  /** Server-side authority for "does this finding already have a GitHub Issue in this repository" (migration 040) — checked before ever calling the real GitHub API, never trusting client/React state. */
+  async findGitHubIssueLink(issueId: string, repositoryId: string, provider: string): Promise<GitHubIssueLink | undefined> {
+    const pool = getPool();
+    if (!pool) return undefined;
+    const result = await pool.query(
+      `SELECT * FROM github_issue_links WHERE issue_id = $1 AND repository_id = $2 AND provider = $3`,
+      [issueId, repositoryId, provider],
+    );
+    if (result.rows.length === 0) return undefined;
+    return this.rowToGitHubIssueLink(result.rows[0]);
+  }
+
+  /**
+   * Atomically records a newly-created GitHub Issue (migration 040) — the
+   * UNIQUE(issue_id, repository_id, provider) constraint plus
+   * `ON CONFLICT DO NOTHING` makes this the race-safe primitive: if two
+   * requests both reach this call for the same finding+repository (e.g. two
+   * near-simultaneous clicks), only ONE insert ever lands; the other gets
+   * `alreadyExisted: true` with the WINNING row's own issue number/url, so
+   * the system never reports two different issue numbers for the same
+   * finding+repository even under a race. (Calling the real GitHub API
+   * itself is separately serialized per-process in
+   * repository-github-issue-service.ts — this guard is the last line of
+   * defense, not the only one.)
+   */
+  async linkGitHubIssue(
+    issueId: string,
+    link: { repositoryId: string; provider: string; githubOwner: string; githubRepository: string; issueNumber: number; issueUrl: string; createdByUserId?: string },
+  ): Promise<{ alreadyExisted: boolean; link: GitHubIssueLink }> {
+    const pool = getPool();
+    if (!pool) throw new Error('Database not configured');
+
+    const inserted = await pool.query(
+      `INSERT INTO github_issue_links (id, issue_id, repository_id, provider, github_owner, github_repository, github_issue_number, github_issue_url, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (issue_id, repository_id, provider) DO NOTHING
+       RETURNING *`,
+      [randomUUID(), issueId, link.repositoryId, link.provider, link.githubOwner, link.githubRepository, link.issueNumber, link.issueUrl, link.createdByUserId ?? null],
+    );
+    if (inserted.rows.length > 0) {
+      return { alreadyExisted: false, link: this.rowToGitHubIssueLink(inserted.rows[0]) };
+    }
+
+    const existing = await this.findGitHubIssueLink(issueId, link.repositoryId, link.provider);
+    if (!existing) throw new Error('github_issue_links insert conflicted but no existing row was found');
+    return { alreadyExisted: true, link: existing };
+  }
+
+  private rowToGitHubIssueLink(row: Record<string, unknown>): GitHubIssueLink {
+    return {
+      repositoryId: row.repository_id as string,
+      provider: row.provider as string,
+      githubOwner: row.github_owner as string,
+      githubRepository: row.github_repository as string,
+      issueNumber: row.github_issue_number as number,
+      issueUrl: row.github_issue_url as string,
+      createdAt: (row.created_at as Date).toISOString(),
+    };
   }
 
   private async loadPageScans(scanId: string): Promise<PageScanRecord[]> {

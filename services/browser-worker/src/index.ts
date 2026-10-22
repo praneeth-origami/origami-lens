@@ -12,6 +12,23 @@ const app = Fastify({ logger: true });
 
 app.get('/health', async () => ({ status: 'ok', service: 'browser-worker' }));
 
+app.post<{ Body: { url: string; widths?: number[] } }>('/scan/responsive', async (request, reply) => {
+  const { url, widths } = request.body ?? {};
+
+  if (!url) {
+    return reply.status(400).send({ error: 'url is required' });
+  }
+
+  try {
+    const viewports = await worker.scanResponsiveViewports(url, widths);
+    return { viewports };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Responsive scan failed';
+    request.log.error(error);
+    return reply.status(500).send({ error: message });
+  }
+});
+
 app.post<{ Body: ScanRequest }>('/scan', async (request, reply) => {
   const { url, options } = request.body;
 

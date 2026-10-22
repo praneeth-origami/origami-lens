@@ -67,6 +67,8 @@ export interface WorkspaceInvitationServiceDeps {
   organizationRepo: WorkspaceInvitationOrganizationRepo;
   userRepo: WorkspaceInvitationUserRepo;
   getPlan(organizationId: string): Promise<SubscriptionPlan>;
+  /** Agency plan (V4) hard seat cap — see EntitlementService.checkSeatCapacity. Always {allowed: true} for every plan except Agency. */
+  checkSeatCapacity(organizationId: string): Promise<{ allowed: boolean; limit: number | null; used: number }>;
   auditLog: { record(input: RecordAuditEventInput): Promise<void> };
   sendWorkspaceInvitationEmail(to: string, input: WorkspaceInvitationEmailInput): Promise<void>;
   webAppBaseUrl: string;
@@ -133,6 +135,20 @@ export async function createWorkspaceInvitation(
       'This plan does not support multiple workspace members. Upgrade to Team to add teammates.',
       'MULTI_MEMBER_NOT_SUPPORTED_ON_PLAN',
     );
+  }
+
+  // A CLIENT_VIEWER never consumes an internal seat (Agency requirements
+  // doc, explicit) — only non-CLIENT_VIEWER invitations are checked against
+  // the hard cap, and the cap is null (always allowed) for every plan but
+  // Agency.
+  if (role !== 'CLIENT_VIEWER') {
+    const capacity = await deps.checkSeatCapacity(organizationId);
+    if (!capacity.allowed) {
+      throw new WorkspaceInvitationError(
+        `This workspace has reached its limit of ${capacity.limit} internal team members.`,
+        'SEAT_LIMIT_REACHED',
+      );
+    }
   }
 
   const existingAccount = await deps.userRepo.findByEmail(email);

@@ -49,6 +49,7 @@ function buildFakes(opts: {
   preview?: InvitationPreview;
   acceptResult?: AcceptInvitationResult;
   emailShouldFail?: boolean;
+  seatCapacity?: { allowed: boolean; limit: number | null; used: number };
 } = {}): Fakes {
   const createCalls: unknown[] = [];
   const revokeCalls: string[] = [];
@@ -82,6 +83,7 @@ function buildFakes(opts: {
       getById: async (id) => (opts.users ?? {})[id],
     },
     getPlan: async () => opts.plan ?? 'TEAM',
+    checkSeatCapacity: async () => opts.seatCapacity ?? { allowed: true, limit: null, used: 0 },
     auditLog: { record: async (input) => { auditCalls.push(input); } },
     sendWorkspaceInvitationEmail: async (to, input) => {
       if (opts.emailShouldFail) throw new Error('smtp down');
@@ -127,6 +129,20 @@ describe('createWorkspaceInvitation', () => {
       () => createWorkspaceInvitation(deps, 'org-1', 'owner-1', 'not-an-email', 'MEMBER'),
       (error: unknown) => error instanceof WorkspaceInvitationError && error.code === 'INVALID_EMAIL',
     );
+  });
+
+  it('bugfix (Agency seat cap): rejects a non-CLIENT_VIEWER invitation once the hard seat cap is reached', async () => {
+    const { deps } = buildFakes({ plan: 'AGENCY', seatCapacity: { allowed: false, limit: 15, used: 15 } });
+    await assert.rejects(
+      () => createWorkspaceInvitation(deps, 'org-1', 'owner-1', 'invitee@example.com', 'MEMBER'),
+      (error: unknown) => { assert.ok(error instanceof WorkspaceInvitationError); assert.equal(error.code, 'SEAT_LIMIT_REACHED'); return true; },
+    );
+  });
+
+  it('bugfix (Agency seat cap): a CLIENT_VIEWER invitation is NEVER checked against the seat cap, even when it is reached', async () => {
+    const { deps, createCalls } = buildFakes({ plan: 'AGENCY', seatCapacity: { allowed: false, limit: 15, used: 15 } });
+    await createWorkspaceInvitation(deps, 'org-1', 'owner-1', 'client@example.com', 'CLIENT_VIEWER');
+    assert.equal(createCalls.length, 1);
   });
 
   it('rejects on a plan that does not support multiple members', async () => {

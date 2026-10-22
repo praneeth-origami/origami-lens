@@ -34,6 +34,16 @@ export interface PageScanResult {
   healthScore: ReturnType<HealthScoreEngine['compute']>;
   artifacts: ScanArtifacts;
   evidenceSummary: EvidenceSummary;
+  /**
+   * The same already privacy-scrubbed (this.privacyScrubber.sanitize) and
+   * screenshot-stripped (stripScreenshotBase64) evidence object rule
+   * evaluation itself runs against — never raw evidence, never re-collected.
+   * Persisted verbatim by callers (scan-pipeline.ts/website-scan-orchestrator.ts)
+   * as `full_evidence_json` so "Ask About This Page" (page-qa-service.ts) can
+   * answer grounded questions about this scan later without re-scraping the
+   * live page or accepting client-supplied evidence.
+   */
+  evidence: BrowserEvidence;
   aiSummary?: AiScanSummary;
   aiAvailable: boolean;
   /**
@@ -140,6 +150,7 @@ export class PageScanRunner {
       healthScore,
       artifacts: artifacts.screenshots.length > 0 ? artifacts : { screenshots: [] },
       evidenceSummary,
+      evidence,
       aiSummary,
       aiAvailable,
       discoveredLinks,

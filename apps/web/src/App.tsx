@@ -10,6 +10,10 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage';
 import { VerifyEmailPage } from './pages/VerifyEmailPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { IssueDetailPage } from './pages/IssueDetailPage';
+import { BugReportDetailPage } from './pages/BugReportDetailPage';
+import { MonitoringListPage } from './pages/MonitoringListPage';
+import { MonitoringDetailPage } from './pages/MonitoringDetailPage';
+import { AgencyPage } from './pages/AgencyPage';
 import { PageScanDetailPage } from './pages/PageScanDetailPage';
 import { ComponentDetailPage } from './pages/ComponentDetailPage';
 import { ScansListPage } from './pages/ScansListPage';
@@ -124,6 +128,10 @@ function AppShell() {
             <Route path="/scans/:scanId" element={<DashboardPage />} />
             <Route path="/scans/:scanId/pages/:pageScanId" element={<PageScanDetailPage />} />
             <Route path="/issues/:issueId" element={<IssueDetailPage />} />
+            <Route path="/bug-reports/:id" element={<BugReportDetailPage />} />
+            <Route path="/monitoring" element={<MonitoringListPage />} />
+            <Route path="/monitoring/:id" element={<MonitoringDetailPage />} />
+            <Route path="/agency" element={<AgencyPage />} />
             <Route path="/components" element={<ComponentsListPage />} />
             <Route path="/components/:jobId" element={<ComponentDetailPage />} />
             <Route path="/repositories" element={<RepositoriesListPage />} />

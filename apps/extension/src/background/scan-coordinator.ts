@@ -176,7 +176,7 @@ export async function pollActiveWebsiteScan(): Promise<void> {
 
 export async function startWebsiteScan(
   options: WebsiteScanOptions,
-): Promise<{ ok: boolean; scanId?: string; error?: string }> {
+): Promise<{ ok: boolean; scanId?: string; error?: string; errorCode?: string }> {
   const existing = await getActiveScan();
   if (existing && isInProgressStatus(existing.status) && !isActiveScanStale(existing)) {
     return {
@@ -218,14 +218,15 @@ export async function startWebsiteScan(
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      const message = (err as { error?: string }).error ?? 'Failed to start website scan.';
+      const { error: message = 'Failed to start website scan.', errorCode } = err as { error?: string; errorCode?: string };
       await setActiveScan({
         ...placeholder,
         status: 'FAILED',
         error: message,
+        errorCode,
         updatedAt: nowIso(),
       });
-      return { ok: false, error: message };
+      return { ok: false, error: message, errorCode };
     }
 
     const data = (await response.json()) as { scanId: string; status?: string };
@@ -256,7 +257,7 @@ export async function startWebsiteScan(
 export async function startCurrentPageScan(
   targetUrl: string,
   pageEvidence: unknown,
-): Promise<{ ok: boolean; scan?: ScanResult; error?: string }> {
+): Promise<{ ok: boolean; scan?: ScanResult; error?: string; errorCode?: string }> {
   const existing = await getActiveScan();
   if (existing && isInProgressStatus(existing.status) && !isActiveScanStale(existing)) {
     return {
@@ -297,14 +298,15 @@ export async function startCurrentPageScan(
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      const message = (err as { error?: string }).error ?? `Scan failed (${response.status}).`;
+      const { error: message = `Scan failed (${response.status}).`, errorCode } = err as { error?: string; errorCode?: string };
       await setActiveScan({
         ...pending,
         status: 'FAILED',
         error: message,
+        errorCode,
         updatedAt: nowIso(),
       });
-      return { ok: false, error: message };
+      return { ok: false, error: message, errorCode };
     }
 
     const scan = (await response.json()) as ScanResult;

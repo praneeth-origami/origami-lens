@@ -10,7 +10,7 @@
  * field through @origami/privacy before it can reach an export or a
  * public page.
  */
-import type { AggregatedIssue, Issue, IssueCategory, LensReport, LensReportIssue, ScanResponse } from '@origami/contracts';
+import type { AggregatedIssue, Issue, IssueCategory, LensReport, LensReportIssue, ReportBranding, ScanResponse } from '@origami/contracts';
 import { CATEGORY_LABEL, REPORT_VERSION } from '@origami/contracts';
 import { scrubString } from '@origami/privacy';
 
@@ -44,13 +44,36 @@ export function isReportReady(status: ScanResponse['status']): boolean {
   return !!status && READY_STATUSES.has(status);
 }
 
-export function buildLensReport(scan: ScanResponse): LensReport {
+function toThreeTierSummary(summary: { critical?: number; high?: number; medium?: number; low?: number }) {
+  const critical = summary.critical ?? 0;
+  const high = summary.high ?? 0;
+  const medium = summary.medium ?? 0;
+  const low = summary.low ?? 0;
+  return {
+    critical, high, medium, low,
+    important: high,
+    improvements: medium + low,
+  };
+}
+
+/**
+ * `branding` is resolved by the CALLER (index.ts routes / report-share-
+ * service.ts) from the scan's owning organization — this function never
+ * looks anything up itself, keeping it a pure function of its inputs, same
+ * as the rest of this file. Absent entirely (not a default "Origami Lens"
+ * object) unless the organization currently has a real Agency entitlement
+ * AND has configured branding — see EntitlementService.canUseWhiteLabelBranding.
+ */
+export function buildLensReport(scan: ScanResponse, branding?: ReportBranding): LensReport {
   const ready = isReportReady(scan.status);
   const categories = ready
     ? (Object.fromEntries(
         Object.entries(scan.healthScore.categories).map(([key, value]) => [key, value.score]),
       ) as Record<IssueCategory, number>)
     : null;
+
+  const desktopShot = scan.artifacts?.screenshots.find((s) => s.viewport === 'desktop');
+  const mobileShot = scan.artifacts?.screenshots.find((s) => s.viewport === 'mobile');
 
   return {
     reportVersion: REPORT_VERSION,
@@ -61,13 +84,13 @@ export function buildLensReport(scan: ScanResponse): LensReport {
     scannedAt: scan.scannedAt,
     healthScore: ready ? scan.healthScore.overallScore : null,
     categories,
-    summary: {
-      critical: scan.summary.critical,
-      high: scan.summary.high,
-      medium: scan.summary.medium,
-      low: scan.summary.low,
-    },
+    summary: toThreeTierSummary(scan.summary),
     issues: ready ? scan.issues.map(toLensReportIssue) : [],
+    screenshots: ready && (desktopShot || mobileShot) ? {
+      desktop: desktopShot ? `/scans/${scan.scanId}/artifacts/${desktopShot.storageKey}` : undefined,
+      mobile: mobileShot ? `/scans/${scan.scanId}/artifacts/${mobileShot.storageKey}` : undefined,
+    } : undefined,
+    branding,
   };
 }
 
@@ -82,8 +105,10 @@ export function sanitizeHostnameForFilename(url: string): string {
   return hostname.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'report';
 }
 
-export function reportFilename(url: string, kind: 'report' | 'issues', extension: string): string {
-  return `origami-lens-${sanitizeHostnameForFilename(url)}-${kind}.${extension}`;
+/** `brandSlug` lets a white-labeled download avoid leaking "origami-lens" into its filename — omitted (default) for every non-Agency or unbranded report, unchanged from before. */
+export function reportFilename(url: string, kind: 'report' | 'issues', extension: string, brandSlug?: string): string {
+  const prefix = brandSlug ? sanitizeHostnameForFilename(brandSlug) : 'origami-lens';
+  return `${prefix}-${sanitizeHostnameForFilename(url)}-${kind}.${extension}`;
 }
 
 export function renderReportJson(report: LensReport): string {
@@ -100,7 +125,7 @@ function formatCategoryTable(report: LensReport): string {
 
 export function renderReportMarkdown(report: LensReport): string {
   const lines: string[] = [];
-  lines.push('# Origami Lens Report', '');
+  lines.push(`# ${report.branding?.displayName ?? 'Origami Lens'} Report`, '');
   lines.push('## Website', '', report.url, '');
   if (!isReportReady(report.reportStatus)) {
     lines.push('## Status', '', `This scan has not completed successfully (status: ${report.reportStatus}) — no health score or issues are available yet.`, '');
@@ -108,7 +133,7 @@ export function renderReportMarkdown(report: LensReport): string {
   }
   lines.push('## Health Score', '', `${report.healthScore} / 100`, '');
   lines.push('## Category Scores', '', formatCategoryTable(report), '');
-  lines.push('## Issue Summary', '', `- Critical: ${report.summary.critical}`, `- High: ${report.summary.high}`, `- Medium: ${report.summary.medium}`, `- Low: ${report.summary.low}`, '');
+  lines.push('## Issue Summary', '', `- Critical: ${report.summary.critical}`, `- Important: ${report.summary.important}`, `- Improvements: ${report.summary.improvements}`, '');
   lines.push('## Issues', '');
   for (const issue of report.issues) {
     lines.push(`### ${issue.severity} — ${issue.title}`, '');

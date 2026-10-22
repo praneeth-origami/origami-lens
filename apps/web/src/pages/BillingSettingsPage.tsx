@@ -151,6 +151,16 @@ export function BillingSettingsPage() {
           )}
         </>
       )}
+
+      {subscription.plan === 'AGENCY' && (
+        <>
+          <div className="section-title">Internal Team Seats</div>
+          <p className="page-subtitle">
+            {entitlements.seatsUsed} of {entitlements.limits.internalSeatHardCap ?? PLAN_DEFINITIONS.AGENCY.includedSeats} internal team members used.
+            {' '}Client viewers you've shared reports with don't count toward this limit.
+          </p>
+        </>
+      )}
     </div>
   );
 }

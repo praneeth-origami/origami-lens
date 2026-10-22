@@ -34,6 +34,7 @@ import type {
   ReportExportFormat,
   CreateReportShareResponse,
   ReportShareStatusResponse,
+  PageAskErrorCode,
   RepositoryAskErrorCode,
   RepositoryFixApplyErrorCode,
   RepositoryFixProposalErrorCode,
@@ -70,7 +71,7 @@ import type {
   SwitchWorkspaceRequest,
 } from '@origami/contracts';
 import { CODE_TARGET_META, DEFAULT_WEBSITE_MAX_PAGES, MAX_WEBSITE_PAGES } from '@origami/contracts';
-import type { FastifyRequest } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { ScanPipeline } from './scan-pipeline.js';
 import { countIssuesByCategory, filterIssues } from './scan-store.js';
 import { checkDependencies } from './health.js';
@@ -80,7 +81,7 @@ import { cancelComponentJob, enqueueComponentJob, startComponentGenerationWorker
 import { ComponentGenerator } from './component-generator.js';
 import { UnifiedComponentStore } from './unified-component-store.js';
 import { DuplicateRepositoryError, UnifiedRepositoryStore } from './unified-repository-store.js';
-import { parseRepositoryUrl, validateBranch } from './repository-service.js';
+import { canAccessRepository, parseRepositoryUrl, validateBranch } from './repository-service.js';
 import { deleteRepositoryClones } from './repository-clone-service.js';
 import { UnifiedRepositoryCloneStore } from './unified-repository-clone-store.js';
 import { cancelRepositoryCloneJob, enqueueRepositoryCloneJob, startRepositoryCloneWorker } from './workers/repository-clone-worker.js';
@@ -92,12 +93,31 @@ import { RepositorySearchRepository } from './db/repository-search-repository.js
 import { SearchError, defaultSearchProviderDeps, searchRepository } from './repository-search-service.js';
 import { AskError, answerRepositoryQuestion } from './repository-ai-service.js';
 import { HttpRepositoryQaProvider } from './repository-qa-provider.js';
+import { PageAskError, answerPageScanQuestion, answerScanQuestion } from './page-qa-service.js';
+import { HttpPageQaProvider } from './page-qa-provider.js';
+import { ElementActionError, answerElementAction } from './element-action-service.js';
+import { HttpElementQaProvider } from './element-qa-provider.js';
+import { ResponsiveTestError, runResponsiveTest } from './responsive-test-service.js';
+import { VisualComparisonError, compareScanScreenshots } from './visual-comparison-service.js';
+import { GitHubIssueError, buildGitHubIssuePreview, createGitHubIssueForFinding } from './repository-github-issue-service.js';
+import { LeadError, createLead } from './lead-service.js';
+import { BugReportError, createBugReport, createGitHubIssueFromBugReport, getBugReport } from './bug-report-service.js';
+import { BugReportRepository } from './db/bug-report-repository.js';
+import { LeadRepository } from './db/lead-repository.js';
 import { FindingFixError, proposeFindingFix as proposeFindingFixForScanIssue } from './repository-finding-fix-service.js';
 import { FindingRepositoryMismatchError, assertFindingRepositoryMatches, resolveRepositoryForIssue } from './repository-finding-resolution-service.js';
 import { HttpFindingFixProvider } from './repository-finding-fix-provider.js';
 import { FixApplicationError, applyFindingFix } from './repository-fix-application-service.js';
 import { FixWorkflowError, approveFindingFix, reviewFindingFix, sweepExpiredFixWorkflows } from './repository-fix-workflow-service.js';
 import { sweepExpiringSubscriptions } from './billing/subscription-expiry-sweep.js';
+import { MonitoredSiteRepository } from './db/monitored-site-repository.js';
+import { MonitoringEventRepository } from './db/monitoring-event-repository.js';
+import { MonitoredSiteError, MonitoredSiteService } from './monitoring/monitored-site-service.js';
+import { sweepDueMonitoredSites } from './monitoring/monitored-site-scheduler.js';
+import { answerMonitoringQuestion, MonitoringAskError } from './monitoring/monitoring-ask-service.js';
+import { HttpMonitoringAskProvider } from './monitoring/monitoring-ask-provider.js';
+import { AgencyBrandingRepository } from './db/agency-branding-repository.js';
+import { AgencyBrandingError, getAgencyBranding, updateAgencyBranding, uploadAgencyLogo, resolveReportBranding } from './agency-branding-service.js';
 import { UnifiedRepositoryFixWorkflowStore } from './unified-repository-fix-workflow-store.js';
 import { resolveRepositoryProvider } from './repository-provider-resolver.js';
 import { isDatabaseEnabled } from './db/pool.js';
@@ -112,6 +132,7 @@ import { AuditLogRepository } from './db/audit-log-repository.js';
 import { WorkspaceInvitationRepository } from './db/workspace-invitation-repository.js';
 import { isPlatformAdmin, canAssignPlatformRole } from './authorization/platform-permissions.js';
 import {
+  canManageWorkspace,
   canManageBilling,
   canManageMembers,
   canConfigureRepository,
@@ -165,9 +186,10 @@ import {
   updateSeats,
 } from './billing/billing-service.js';
 import { buildGitHubAppInstallUrl, isGitHubAppConfigured, uninstallGitHubApp } from './github-app-auth.js';
+import { buildGitHubPushAuthorizeUrl, isGitHubPushOAuthConfigured, GitHubPushOAuthError } from './github-push-oauth.js';
 import { buildGitLabAuthorizeUrl, isGitLabOAuthConfigured, GitLabOAuthError } from './gitlab-oauth.js';
 import { buildBitbucketAuthorizeUrl, isBitbucketOAuthConfigured, BitbucketOAuthError } from './bitbucket-oauth.js';
-import { connectGitHubInstallation, connectGitLabAccount, connectBitbucketAccount } from './provider-connection-service.js';
+import { connectGitHubInstallation, connectGitHubUserPush, connectGitLabAccount, connectBitbucketAccount } from './provider-connection-service.js';
 import { createAuthMiddleware, SESSION_COOKIE_NAME, sessionCookieOptions } from './auth-middleware.js';
 import { AuthError, getSessionTtlMs, loginWithGitHub, loginWithGoogle, logout as logoutSession } from './auth-service.js';
 import {
@@ -268,6 +290,9 @@ const sessionRepository = new SessionRepository();
 const passwordResetTokenRepository = new PasswordResetTokenRepository();
 const emailVerificationTokenRepository = new EmailVerificationTokenRepository();
 const reportShareLinkRepository = new ReportShareLinkRepository();
+const leadRepository = new LeadRepository();
+const LEADS_NOTIFICATION_EMAIL = process.env.LEADS_NOTIFICATION_EMAIL;
+const bugReportRepository = new BugReportRepository();
 const authMiddleware = createAuthMiddleware(sessionRepository);
 // Phase 16/C — real, per-user Git provider authorization (migration 013). Same "Postgres or disabled, never a JSON fallback" rule as users/sessions above.
 const providerConnectionRepository = new ProviderConnectionRepository();
@@ -290,6 +315,39 @@ const auditLogRepository = new AuditLogRepository();
 const workspaceInvitationRepository = new WorkspaceInvitationRepository();
 const founderBootstrap = { userRepo: userRepository, auditLog: auditLogRepository };
 const workspaceRoleMiddleware = createWorkspaceRoleMiddleware(organizationRepository);
+
+// Continuous Website Monitoring (V3, migration 041) — reuses the SAME scan
+// pipeline/repository (`repo`, the Postgres ScanRepository behind `store`)
+// as every other scan feature; only the configuration/event tables and the
+// regression-comparison layer on top are new. See monitoring/*.ts.
+const monitoredSiteRepository = new MonitoredSiteRepository();
+const monitoringEventRepository = new MonitoringEventRepository();
+const monitoredSiteService = new MonitoredSiteService({
+  monitoredSiteRepo: monitoredSiteRepository,
+  scanRepo: repo,
+  eventRepo: monitoringEventRepository,
+  entitlementService,
+  createWebsiteScanRecord: (rootUrl, options, ownerId, organizationId, monitoredSiteId) =>
+    createWebsiteScanRecord(repo, rootUrl, options, ownerId, organizationId, monitoredSiteId),
+  enqueueWebsiteScan: (scanId, rootUrl, options, ownerId, monitoredSiteId) =>
+    enqueueWebsiteScan({ scanId, rootUrl, options, ownerId, monitoredSiteId }),
+});
+const monitoringAskProvider = new HttpMonitoringAskProvider();
+
+// Agency plan (V4) — client workspaces (organization-repository.ts),
+// white-label branding, lead audits, and report-sharing expiration. See
+// migration 042 and the Agency implementation report.
+const agencyBrandingRepository = new AgencyBrandingRepository();
+/** Same bare, API-route-relative path convention as report.screenshots.desktop/mobile (report-service.ts) — the frontend prepends /api itself (see ScreenshotViewer.tsx/SharedReportPage.tsx), never a frontend-origin-aware URL built server-side. */
+function agencyLogoUrl(organizationId: string): string {
+  return `/agency/branding/${organizationId}/logo`;
+}
+const agencyBrandingServiceDeps = {
+  brandingRepo: agencyBrandingRepository,
+  artifactStore,
+  canUseWhiteLabelBranding: (organizationId: string) => entitlementService.canUseWhiteLabelBranding(organizationId),
+  logoUrl: (organizationId: string, _storageKey: string) => agencyLogoUrl(organizationId),
+};
 
 /**
  * Every repository route's real ownership boundary since Phase 2: the set
@@ -391,6 +449,8 @@ const fixProposalDeps: ProposeFixDeps = { provider: new HttpFixProposalProvider(
 
 /** Phase 9 — repository AI assistant's LLM provider, isolated from gateway.ts exactly like Phase 8's issue-analysis/fix-proposal providers. */
 const repositoryQaProvider = new HttpRepositoryQaProvider();
+const pageQaProvider = new HttpPageQaProvider();
+const elementQaProvider = new HttpElementQaProvider();
 
 /** Maps a Phase 9 ask failure to an HTTP status — same "generic 404, never confirm existence" convention as searchErrorStatusCode/issueErrorStatusCode. Most codes are inherited 1:1 from Phase 5's own SearchError taxonomy (see repository-ai-service.ts's mapSearchErrorCode) since Q&A reuses searchRepository() directly. */
 function askErrorStatusCode(code: RepositoryAskErrorCode): number {
@@ -408,6 +468,145 @@ function askErrorStatusCode(code: RepositoryAskErrorCode): number {
     case 'EMBEDDING_PROVIDER_UNAVAILABLE':
     case 'LLM_PROVIDER_UNAVAILABLE':
       return 503;
+    default:
+      return 500;
+  }
+}
+
+/** Maps an "Ask About This Page" failure to an HTTP status — same "generic 404, never confirm existence" convention as askErrorStatusCode above. */
+function pageAskErrorStatusCode(code: PageAskErrorCode): number {
+  switch (code) {
+    case 'SCAN_NOT_FOUND':
+    case 'PAGE_NOT_FOUND':
+      return 404;
+    case 'ASK_QUESTION_INVALID':
+      return 400;
+    case 'SCAN_NOT_READY':
+    case 'EVIDENCE_UNAVAILABLE':
+      return 503;
+    case 'LLM_TIMEOUT':
+      return 504;
+    case 'LLM_PROVIDER_UNAVAILABLE':
+      return 503;
+    default:
+      return 500;
+  }
+}
+
+function monitoredSiteErrorStatusCode(code: import('@origami/contracts').MonitoredSiteErrorCode): number {
+  switch (code) {
+    case 'MONITORED_SITE_NOT_FOUND':
+      return 404;
+    case 'MONITORED_SITE_INVALID':
+    case 'MONITORED_SITE_URL_UNSAFE':
+      return 400;
+    case 'MONITORED_SITE_LIMIT_REACHED':
+      return 402;
+    case 'MONITORED_SITE_SCAN_IN_PROGRESS':
+      return 409;
+    default:
+      return 500;
+  }
+}
+
+function monitoringAskErrorStatusCode(code: import('@origami/contracts').MonitoringAskErrorCode): number {
+  switch (code) {
+    case 'MONITORED_SITE_NOT_FOUND':
+      return 404;
+    case 'NO_SCAN_DATA':
+      return 503;
+    case 'LLM_TIMEOUT':
+      return 504;
+    case 'LLM_PROVIDER_UNAVAILABLE':
+      return 503;
+    case 'LLM_INVALID_RESPONSE':
+      return 502;
+    default:
+      return 500;
+  }
+}
+
+/** Maps a "Select Anything" element-action failure to an HTTP status — same "generic 404, never confirm existence" convention as the other ask-shaped routes (though REPOSITORY_NOT_READY here is deliberately never surfaced — see FALLBACK_TO_BROWSER_ONLY in element-action-service.ts). */
+function elementActionErrorStatusCode(code: import('@origami/contracts').ElementActionErrorCode): number {
+  switch (code) {
+    case 'REPOSITORY_NOT_FOUND':
+    case 'REPOSITORY_ACCESS_DENIED':
+      return 404;
+    case 'EVIDENCE_BLOCKED':
+      return 400;
+    case 'REPOSITORY_NOT_READY':
+      return 503;
+    case 'LLM_TIMEOUT':
+      return 504;
+    case 'LLM_PROVIDER_UNAVAILABLE':
+      return 503;
+    default:
+      return 500;
+  }
+}
+
+/** Maps an Automatic Responsive Testing failure to an HTTP status. */
+function responsiveTestErrorStatusCode(code: import('@origami/contracts').ResponsiveTestErrorCode): number {
+  switch (code) {
+    case 'URL_INVALID':
+      return 400;
+    case 'BROWSER_WORKER_UNAVAILABLE':
+      return 503;
+    default:
+      return 500;
+  }
+}
+
+/** Maps a Visual Comparison failure to an HTTP status. */
+function visualComparisonErrorStatusCode(code: import('@origami/contracts').VisualComparisonErrorCode): number {
+  switch (code) {
+    case 'SCAN_NOT_FOUND':
+    case 'ARTIFACT_NOT_FOUND':
+      return 404;
+    case 'DIMENSION_MISMATCH':
+      return 400;
+    default:
+      return 500;
+  }
+}
+
+/** Maps a Create GitHub Issue (roadmap Phase 7) failure to an HTTP status. */
+function gitHubIssueErrorStatusCode(code: import('@origami/contracts').GitHubIssueErrorCode): number {
+  switch (code) {
+    case 'FINDING_NOT_FOUND':
+    case 'REPOSITORY_NOT_FOUND':
+    case 'REPOSITORY_ACCESS_DENIED':
+      return 404;
+    case 'PROVIDER_UNSUPPORTED':
+      return 400;
+    case 'GITHUB_AUTH_NOT_CONFIGURED':
+    case 'GITHUB_PERMISSION_DENIED':
+      return 403;
+    default:
+      return 502;
+  }
+}
+
+/** Maps a lead-submission failure ("Talk to Origami", roadmap Phase 8) to an HTTP status. */
+function leadErrorStatusCode(code: import('@origami/contracts').LeadErrorCode): number {
+  switch (code) {
+    case 'NAME_REQUIRED':
+    case 'EMAIL_INVALID':
+      return 400;
+    case 'SCAN_NOT_FOUND':
+      return 404;
+    default:
+      return 500;
+  }
+}
+
+function bugReportErrorStatusCode(code: import('@origami/contracts').BugReportErrorCode): number {
+  switch (code) {
+    case 'BUG_REPORT_NOT_FOUND':
+    case 'BUG_REPORT_ACCESS_DENIED':
+      return 404;
+    case 'BUG_REPORT_INVALID':
+      return 400;
     default:
       return 500;
   }
@@ -458,6 +657,7 @@ function findingFixErrorStatusCode(code: RepositoryFixProposalErrorCode): number
     case 'REPOSITORY_NOT_READY':
     case 'EMBEDDINGS_NOT_READY':
     case 'PROPOSAL_INVALID':
+    case 'PROPOSAL_UNGROUNDED':
       return 400;
     case 'EMBEDDING_TIMEOUT':
     case 'LLM_TIMEOUT':
@@ -475,6 +675,10 @@ function findingFixErrorStatusCode(code: RepositoryFixProposalErrorCode): number
       // (see Issue.repositoryId) — a 409 (conflicts with the finding's
       // current state), same convention as fixApplicationErrorStatusCode's
       // STALE_REPOSITORY below.
+      return 409;
+    case 'SOURCE_REVISION_MISMATCH':
+      // A data-consistency conflict in the indexing pipeline itself (not a
+      // problem with the request) — same 409 convention as REPOSITORY_MISMATCH above.
       return 409;
     default:
       return 500;
@@ -539,10 +743,17 @@ function fixWorkflowErrorStatusCode(code: RepositoryFixWorkflowErrorCode): numbe
       return 409;
     case 'CANCELLED':
       return 499;
+    case 'ADMIN_APPROVAL_REQUIRED':
+      // A real, expected permission boundary (neither the GitHub App nor
+      // the user's own access can reach this repo) — 403, not a 5xx
+      // (nothing is misconfigured/unreachable) and not a 4xx validation
+      // error (the request itself was well-formed).
+      return 403;
     case 'GIT_AUTH_NOT_CONFIGURED':
     case 'GIT_REMOTE_UNAVAILABLE':
     case 'PROVIDER_UNSUPPORTED':
     case 'GIT_COMMIT_IDENTITY_MISSING':
+    case 'FORK_NOT_READY':
       return 503;
     case 'GIT_COMMIT_FAILED':
     case 'GIT_PUSH_FAILED':
@@ -618,6 +829,23 @@ if (process.env.START_SCAN_WORKER !== 'false') {
       console.error('[subscription-expiry-sweep] sweep failed:', error instanceof Error ? error.message : error);
     });
   }, subscriptionExpirySweepIntervalMs).unref();
+
+  // Continuous Website Monitoring (V3) — same "plain interval sweep, not a
+  // queue job" shape as the two sweeps above. Defaults to checking every 5
+  // minutes for sites whose next_scan_at is due; MonitoredSiteRepository.
+  // claimDueSites' own atomic UPDATE...RETURNING is what makes a 5-minute
+  // poll interval safe to run on every tick without double-scheduling
+  // anything (see its doc comment).
+  const monitoringSweepIntervalMs = Number(process.env.MONITORING_SWEEP_INTERVAL_MS ?? 300_000);
+  setInterval(() => {
+    sweepDueMonitoredSites({
+      monitoredSiteRepo: monitoredSiteRepository,
+      monitoredSiteService,
+      entitlementService,
+    }).catch((error) => {
+      console.error('[monitoring-scheduler] sweep failed:', error instanceof Error ? error.message : error);
+    });
+  }, monitoringSweepIntervalMs).unref();
 }
 
 const app = Fastify({ logger: true, bodyLimit: MAX_REQUEST_BODY_BYTES });
@@ -926,12 +1154,42 @@ app.post<{ Body: { persona?: unknown } }>('/auth/persona', { preHandler: authMid
 const GITHUB_INSTALL_STATE_COOKIE = 'gh_install_state';
 const GITHUB_INSTALL_STATE_TTL_MS = 10 * 60 * 1000;
 
-app.get('/providers/github/connect', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+/**
+ * Only an absolute PATH on our own origin — never a scheme (`https://evil`),
+ * never protocol-relative (`//evil.com`), which would otherwise let the
+ * `returnTo` query param below be used as an open redirect. Used by both the
+ * GitHub App and GitHub push OAuth connect/callback pairs so "Create GitHub
+ * Issue"'s in-context setup modal (Issue Detail page) can send the user back
+ * to the exact page/modal they started from instead of always landing on
+ * the dashboard root.
+ */
+function safeReturnTo(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw.startsWith('/') || raw.startsWith('//')) return undefined;
+  return raw;
+}
+
+/**
+ * On a real OAuth failure (state mismatch, user denied, exchange failed),
+ * redirecting back to `returnTo` with an error code lets the page that
+ * started the flow (e.g. Create GitHub Issue's setup modal) show a real
+ * in-context error instead of the user landing on a blank JSON response.
+ * Only done when `returnTo` is present — every pre-existing caller with no
+ * `returnTo` keeps the exact original raw-JSON-error response.
+ */
+function redirectOauthError(reply: FastifyReply, returnTo: string | undefined, errorCode: string, fallbackStatus: number, fallbackMessage: string) {
+  if (!returnTo) return reply.status(fallbackStatus).send({ error: fallbackMessage, errorCode });
+  const url = new URL(returnTo, WEB_APP_BASE_URL);
+  url.searchParams.set('githubConnectError', errorCode);
+  return reply.redirect(url.toString());
+}
+
+app.get<{ Querystring: { returnTo?: string } }>('/providers/github/connect', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
   if (!isGitHubAppConfigured()) {
     return reply.status(503).send({ error: 'GitHub App is not configured.', errorCode: 'AUTH_NOT_CONFIGURED' });
   }
   const state = randomUUID();
-  reply.setCookie(GITHUB_INSTALL_STATE_COOKIE, state, sessionCookieOptions(request, GITHUB_INSTALL_STATE_TTL_MS));
+  const returnTo = safeReturnTo(request.query?.returnTo);
+  reply.setCookie(GITHUB_INSTALL_STATE_COOKIE, JSON.stringify({ state, returnTo }), sessionCookieOptions(request, GITHUB_INSTALL_STATE_TTL_MS));
   return reply.redirect(buildGitHubAppInstallUrl(state));
 });
 
@@ -939,20 +1197,79 @@ app.get<{ Querystring: { installation_id?: string; state?: string } }>(
   '/providers/github/callback',
   { preHandler: authMiddleware.requireAuth },
   async (request, reply) => {
-    const expectedState = request.cookies?.[GITHUB_INSTALL_STATE_COOKIE];
+    const cookieRaw = request.cookies?.[GITHUB_INSTALL_STATE_COOKIE];
     reply.clearCookie(GITHUB_INSTALL_STATE_COOKIE, { path: '/' });
+    const { state: expectedState, returnTo } = (() => {
+      try { return JSON.parse(cookieRaw ?? '') as { state?: string; returnTo?: string }; } catch { return {}; }
+    })();
 
     const { installation_id: installationIdRaw, state } = request.query ?? {};
     if (!state || !expectedState || state !== expectedState) {
-      return reply.status(400).send({ error: 'State did not match — please try connecting GitHub again.', errorCode: 'OAUTH_STATE_MISMATCH' });
+      return redirectOauthError(reply, returnTo, 'OAUTH_STATE_MISMATCH', 400, 'State did not match — please try connecting GitHub again.');
     }
     const installationId = Number(installationIdRaw);
     if (!installationIdRaw || !Number.isFinite(installationId)) {
-      return reply.status(400).send({ error: 'GitHub did not report a valid installation id.' });
+      return redirectOauthError(reply, returnTo, 'OAUTH_INVALID_RESPONSE', 400, 'GitHub did not report a valid installation id.');
     }
 
     await connectGitHubInstallation(request.user!.id, installationId, { connectionRepo: providerConnectionRepository });
-    return reply.redirect(WEB_APP_BASE_URL);
+    return reply.redirect(`${WEB_APP_BASE_URL}${returnTo ?? ''}`);
+  },
+);
+
+/*
+ * GitHub direct-push connection — a SEPARATE OAuth App from the GitHub App
+ * above (see github-push-oauth.ts's doc comment for why: a GitHub App's
+ * tokens can never reach a repo it isn't installed on, no matter the
+ * user's own permissions). Lets a user create PRs on a company repo where
+ * an admin never installed the App, using their own GitHub access instead
+ * — see repository-github-provider-client.ts's resolvePrStrategy. Same
+ * double-submit-cookie CSRF pattern as every other provider connect/callback
+ * pair in this file.
+ */
+const GITHUB_PUSH_OAUTH_STATE_COOKIE = 'gh_push_oauth_state';
+const GITHUB_PUSH_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+app.get<{ Querystring: { returnTo?: string } }>('/providers/github/push/connect', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+  if (!isGitHubPushOAuthConfigured()) {
+    return reply.status(503).send({ error: 'GitHub direct-push authorization is not configured.', errorCode: 'AUTH_NOT_CONFIGURED' });
+  }
+  const state = randomUUID();
+  const returnTo = safeReturnTo(request.query?.returnTo);
+  reply.setCookie(GITHUB_PUSH_OAUTH_STATE_COOKIE, JSON.stringify({ state, returnTo }), sessionCookieOptions(request, GITHUB_PUSH_OAUTH_STATE_TTL_MS));
+  return reply.redirect(buildGitHubPushAuthorizeUrl(state));
+});
+
+app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
+  '/providers/github/push/callback',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    const cookieRaw = request.cookies?.[GITHUB_PUSH_OAUTH_STATE_COOKIE];
+    reply.clearCookie(GITHUB_PUSH_OAUTH_STATE_COOKIE, { path: '/' });
+    const { state: expectedState, returnTo } = (() => {
+      try { return JSON.parse(cookieRaw ?? '') as { state?: string; returnTo?: string }; } catch { return {}; }
+    })();
+
+    const { code, state, error } = request.query ?? {};
+    if (error) {
+      return redirectOauthError(reply, returnTo, 'OAUTH_EXCHANGE_FAILED', 400, 'GitHub authorization was denied.');
+    }
+    if (!state || !expectedState || state !== expectedState) {
+      return redirectOauthError(reply, returnTo, 'OAUTH_STATE_MISMATCH', 400, 'State did not match — please try connecting GitHub again.');
+    }
+    if (!code) {
+      return redirectOauthError(reply, returnTo, 'OAUTH_INVALID_RESPONSE', 400, 'GitHub did not return an authorization code.');
+    }
+
+    try {
+      await connectGitHubUserPush(request.user!.id, code, { connectionRepo: providerConnectionRepository });
+    } catch (error_) {
+      if (error_ instanceof GitHubPushOAuthError) {
+        return redirectOauthError(reply, returnTo, error_.code, 502, error_.message);
+      }
+      throw error_;
+    }
+    return reply.redirect(`${WEB_APP_BASE_URL}${returnTo ?? ''}`);
   },
 );
 
@@ -1055,7 +1372,16 @@ app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
 app.get('/providers/connections', { preHandler: authMiddleware.requireAuth }, async (request): Promise<ListProviderConnectionsResponse> => {
   const connections = await providerConnectionRepository.listForUser(request.user!.id);
   return {
-    connections: connections.map((c) => ({ id: c.id, provider: c.provider, externalAccountLogin: c.externalAccountLogin, status: c.status, createdAt: c.createdAt })),
+    connections: connections.map((c) => ({
+      id: c.id,
+      provider: c.provider,
+      externalAccountLogin: c.externalAccountLogin,
+      status: c.status,
+      createdAt: c.createdAt,
+      // installationId itself is never sent to the client — only which KIND
+      // of GitHub connection this row is, derived from its presence.
+      connectionKind: c.provider === 'GITHUB' ? (c.installationId !== undefined ? 'APP_INSTALLATION' : 'DIRECT_PUSH') : undefined,
+    })),
   };
 });
 
@@ -1201,6 +1527,8 @@ function workspaceErrorStatusCode(code: WorkspaceErrorCode): number {
     case 'CANNOT_REMOVE_LAST_OWNER':
     case 'MULTI_MEMBER_NOT_SUPPORTED_ON_PLAN':
       return 400;
+    case 'SEAT_LIMIT_REACHED':
+      return 402;
     default:
       return 500;
   }
@@ -1224,10 +1552,15 @@ async function getPlanForOrganization(organizationId: string) {
   return subscription.plan;
 }
 
+function checkSeatCapacityForOrganization(organizationId: string) {
+  return entitlementService.checkSeatCapacity(organizationId);
+}
+
 const workspaceMemberServiceDeps = {
   userRepo: userRepository,
   organizationRepo: organizationRepository,
   getPlan: getPlanForOrganization,
+  checkSeatCapacity: checkSeatCapacityForOrganization,
   auditLog: auditLogRepository,
   sendWorkspaceMemberAddedEmail,
   sendWorkspaceMemberRemovedEmail,
@@ -1241,6 +1574,7 @@ const workspaceInvitationServiceDeps = {
   organizationRepo: organizationRepository,
   userRepo: userRepository,
   getPlan: getPlanForOrganization,
+  checkSeatCapacity: checkSeatCapacityForOrganization,
   auditLog: auditLogRepository,
   sendWorkspaceInvitationEmail,
   webAppBaseUrl: WEB_APP_BASE_URL,
@@ -1262,6 +1596,8 @@ function workspaceInvitationErrorStatusCode(code: WorkspaceInvitationErrorCode):
     case 'INVITATION_ALREADY_ACCEPTED':
     case 'EMAIL_MISMATCH':
       return 400;
+    case 'SEAT_LIMIT_REACHED':
+      return 402;
     default:
       return 500;
   }
@@ -1463,6 +1799,157 @@ app.post<{ Body: SwitchWorkspaceRequest }>('/workspace/switch', { preHandler: au
   if (!role) return reply.status(404).send({ error: 'Not a member of that workspace.', errorCode: 'MEMBER_NOT_FOUND' });
   await userRepository.updateActiveOrganizationId(request.user!.id, request.body.organizationId);
   return { ok: true };
+});
+
+/* ------------------------------------------------------------------------ */
+/* Agency plan (V4) — client workspaces. A client workspace is an ORDINARY  */
+/* organization (full existing tenant isolation already applies) that an    */
+/* agency created; parent_organization_id (migration 042) is a listing/     */
+/* management relationship only, never an access grant by itself — the     */
+/* creating user becomes its OWNER and any other access still requires its */
+/* own organization_memberships row, exactly like any other workspace.     */
+/* ------------------------------------------------------------------------ */
+
+function clientWorkspaceErrorStatusCode(code: import('@origami/contracts').ClientWorkspaceErrorCode): number {
+  switch (code) {
+    case 'FORBIDDEN':
+      return 403;
+    case 'NOT_AN_AGENCY_PLAN':
+      return 402;
+    case 'INVALID_NAME':
+      return 400;
+    case 'CLIENT_WORKSPACE_NOT_FOUND':
+      return 404;
+    default:
+      return 500;
+  }
+}
+
+app.post<{ Body: import('@origami/contracts').CreateClientWorkspaceRequest }>(
+  '/organizations/clients',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+    if (!organizationId) return reply.status(401).send({ error: 'Authentication required.', errorCode: 'UNAUTHENTICATED' });
+    try {
+      await assertWorkspaceRole(organizationRepository, request.user!.id, organizationId, canManageMembers);
+
+      const canManage = await entitlementService.canManageClientWorkspaces(organizationId);
+      if (!canManage) {
+        return reply.status(clientWorkspaceErrorStatusCode('NOT_AN_AGENCY_PLAN')).send({
+          error: 'Client workspace management is available on the Agency plan.',
+          errorCode: 'NOT_AN_AGENCY_PLAN',
+        });
+      }
+
+      const name = request.body?.name?.trim();
+      if (!name) {
+        return reply.status(clientWorkspaceErrorStatusCode('INVALID_NAME')).send({ error: 'A client workspace name is required.', errorCode: 'INVALID_NAME' });
+      }
+
+      const workspace = await organizationRepository.createClientWorkspace(organizationId, request.user!.id, name);
+      return reply.status(201).send(workspace);
+    } catch (error) {
+      if (error instanceof WorkspaceAuthorizationError) return reply.status(403).send({ error: error.message, errorCode: 'FORBIDDEN' });
+      throw error;
+    }
+  },
+);
+
+app.get('/organizations/clients', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+  const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+  if (!organizationId) return reply.status(401).send({ error: 'Authentication required.', errorCode: 'UNAUTHENTICATED' });
+  try {
+    await assertWorkspaceRole(organizationRepository, request.user!.id, organizationId, canReadWorkspaceResource);
+  } catch (error) {
+    if (error instanceof WorkspaceAuthorizationError) return reply.status(403).send({ error: error.message, errorCode: 'FORBIDDEN' });
+    throw error;
+  }
+  const clients = await organizationRepository.listClientWorkspacesForAgency(organizationId);
+  return { clients };
+});
+
+/* ------------------------------------------------------------------------ */
+/* Agency plan (V4) — white-label branding. GET/PUT/logo-upload are OWNER/   */
+/* ADMIN-only (canManageWorkspace), matching "workspace settings" elsewhere. */
+/* The public logo-serving route has NO auth — a shared report's branding   */
+/* must render for an unauthenticated recipient, same posture as the       */
+/* existing public GET /reports/share/:token route.                       */
+/* ------------------------------------------------------------------------ */
+
+function agencyBrandingErrorStatusCode(code: import('@origami/contracts').AgencyBrandingErrorCode): number {
+  switch (code) {
+    case 'FORBIDDEN':
+      return 403;
+    case 'NOT_AN_AGENCY_PLAN':
+      return 402;
+    case 'INVALID_COLOR':
+    case 'INVALID_LOGO_TYPE':
+    case 'LOGO_TOO_LARGE':
+      return 400;
+    default:
+      return 500;
+  }
+}
+
+app.get('/agency/branding', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+  const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+  if (!organizationId) return reply.status(401).send({ error: 'Authentication required.', errorCode: 'UNAUTHENTICATED' });
+  try {
+    await assertWorkspaceRole(organizationRepository, request.user!.id, organizationId, canManageWorkspace);
+    const branding = await getAgencyBranding(agencyBrandingServiceDeps, organizationId);
+    return branding ?? { organizationId, updatedAt: new Date(0).toISOString() };
+  } catch (error) {
+    if (error instanceof WorkspaceAuthorizationError) return reply.status(403).send({ error: error.message, errorCode: 'FORBIDDEN' });
+    if (error instanceof AgencyBrandingError) return reply.status(agencyBrandingErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+    throw error;
+  }
+});
+
+app.put<{ Body: import('@origami/contracts').UpdateAgencyBrandingRequest }>(
+  '/agency/branding',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+    if (!organizationId) return reply.status(401).send({ error: 'Authentication required.', errorCode: 'UNAUTHENTICATED' });
+    try {
+      await assertWorkspaceRole(organizationRepository, request.user!.id, organizationId, canManageWorkspace);
+      return await updateAgencyBranding(agencyBrandingServiceDeps, organizationId, request.body ?? {});
+    } catch (error) {
+      if (error instanceof WorkspaceAuthorizationError) return reply.status(403).send({ error: error.message, errorCode: 'FORBIDDEN' });
+      if (error instanceof AgencyBrandingError) return reply.status(agencyBrandingErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      throw error;
+    }
+  },
+);
+
+app.post<{ Body: { contentType?: string; base64?: string } }>(
+  '/agency/branding/logo',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+    if (!organizationId) return reply.status(401).send({ error: 'Authentication required.', errorCode: 'UNAUTHENTICATED' });
+    const { contentType, base64 } = request.body ?? {};
+    if (!contentType || !base64) return reply.status(400).send({ error: 'contentType and base64 are required.' });
+    try {
+      await assertWorkspaceRole(organizationRepository, request.user!.id, organizationId, canManageWorkspace);
+      return await uploadAgencyLogo(agencyBrandingServiceDeps, organizationId, contentType, base64);
+    } catch (error) {
+      if (error instanceof WorkspaceAuthorizationError) return reply.status(403).send({ error: error.message, errorCode: 'FORBIDDEN' });
+      if (error instanceof AgencyBrandingError) return reply.status(agencyBrandingErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      throw error;
+    }
+  },
+);
+
+app.get<{ Params: { organizationId: string } }>('/agency/branding/:organizationId/logo', async (request, reply) => {
+  const raw = await agencyBrandingRepository.getRaw(request.params.organizationId);
+  if (!raw?.logoStorageKey) return reply.status(404).send({ error: 'Logo not found' });
+  const filePath = artifactStore.getArtifactPath(request.params.organizationId, raw.logoStorageKey);
+  if (!filePath) return reply.status(404).send({ error: 'Logo not found' });
+  const data = fs.readFileSync(filePath);
+  const contentType = raw.logoStorageKey.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
+  return reply.type(contentType).send(data);
 });
 
 /*
@@ -1816,6 +2303,94 @@ app.get<{ Params: { scanId: string }; Querystring: IssueFilters }>(
   },
 );
 
+/**
+ * "Ask About This Page" for a CURRENT_PAGE scan — the scan row itself IS the
+ * one page (see migration 001's page_scans table, which CURRENT_PAGE scans
+ * never populate). Distinct from POST /ai/ask (a stateless, live-evidence
+ * passthrough): this answers from evidence captured and privacy-scrubbed at
+ * scan time and persisted on the scan row (migration 036's full_evidence_json),
+ * never from client-supplied live evidence. Same role/quota gating as
+ * /repositories/:id/ask — this is the same "AI question" capability, just
+ * grounded in a scan instead of a repository.
+ */
+app.post<{ Params: { scanId: string }; Body: { question?: unknown } }>(
+  '/scans/:scanId/ask',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('AI_QUESTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    if (!repo.isEnabled()) {
+      return reply.status(503).send({ error: 'Ask About This Page requires a configured database.', errorCode: 'SCAN_NOT_FOUND' });
+    }
+
+    const controller = new AbortController();
+    const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    reply.raw.on('close', onClose);
+
+    try {
+      return await answerScanQuestion(
+        repo,
+        request.params.scanId,
+        await resolveOrganizationIds(request.user!.id),
+        request.body?.question,
+        { qaProvider: pageQaProvider },
+        controller.signal,
+      );
+    } catch (error) {
+      if (error instanceof PageAskError) {
+        return reply.status(pageAskErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    } finally {
+      reply.raw.off('close', onClose);
+    }
+  },
+);
+
+/** Same as POST /scans/:scanId/ask above, for one page of a WEBSITE scan. */
+app.post<{ Params: { scanId: string; pageScanId: string }; Body: { question?: unknown } }>(
+  '/scans/:scanId/pages/:pageScanId/ask',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('AI_QUESTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    if (!repo.isEnabled()) {
+      return reply.status(503).send({ error: 'Ask About This Page requires a configured database.', errorCode: 'PAGE_NOT_FOUND' });
+    }
+
+    const controller = new AbortController();
+    const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    reply.raw.on('close', onClose);
+
+    try {
+      return await answerPageScanQuestion(
+        repo,
+        request.params.scanId,
+        request.params.pageScanId,
+        await resolveOrganizationIds(request.user!.id),
+        request.body?.question,
+        { qaProvider: pageQaProvider },
+        controller.signal,
+      );
+    } catch (error) {
+      if (error instanceof PageAskError) {
+        return reply.status(pageAskErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    } finally {
+      reply.raw.off('close', onClose);
+    }
+  },
+);
+
 const VALID_EXPORT_FORMATS = new Set<ReportExportFormat>(['pdf', 'json', 'markdown', 'csv']);
 
 /**
@@ -1842,28 +2417,39 @@ app.get<{ Params: { scanId: string; format: string } }>(
       return reply.status(409).send({ error: 'This scan has not completed successfully yet, so it has no report to export.', errorCode: 'REPORT_NOT_READY' });
     }
 
-    const report = buildLensReport(scan);
+    const branding = await resolveReportBranding(agencyBrandingServiceDeps, scan.organizationId);
+    const report = buildLensReport(scan, branding);
+    const brandSlug = branding?.displayName;
     switch (format) {
       case 'json':
         return reply
           .type('application/json')
-          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'report', 'json')}"`)
+          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'report', 'json', brandSlug)}"`)
           .send(renderReportJson(report));
       case 'markdown':
         return reply
           .type('text/markdown')
-          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'report', 'md')}"`)
+          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'report', 'md', brandSlug)}"`)
           .send(renderReportMarkdown(report));
       case 'csv':
         return reply
           .type('text/csv')
-          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'issues', 'csv')}"`)
+          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'issues', 'csv', brandSlug)}"`)
           .send(renderReportCsv(report));
       case 'pdf': {
-        const pdf = await renderReportPdf(report);
+        const desktopBase64 = report.screenshots?.desktop
+          ? artifactStore.readArtifactBase64(scan.scanId, report.screenshots.desktop.split('/').pop()!)
+          : undefined;
+        const rawBranding = scan.organizationId ? await agencyBrandingRepository.getRaw(scan.organizationId) : undefined;
+        const logoBase64 = branding && rawBranding?.logoStorageKey ? artifactStore.readArtifactBase64(scan.organizationId!, rawBranding.logoStorageKey) : undefined;
+        const pdf = await renderReportPdf(
+          report,
+          desktopBase64 ? { desktop: Buffer.from(desktopBase64, 'base64') } : undefined,
+          logoBase64 ? { logo: Buffer.from(logoBase64, 'base64') } : undefined,
+        );
         return reply
           .type('application/pdf')
-          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'report', 'pdf')}"`)
+          .header('Content-Disposition', `attachment; filename="${reportFilename(scan.url, 'report', 'pdf', brandSlug)}"`)
           .send(pdf);
       }
     }
@@ -1882,7 +2468,12 @@ function reportShareErrorStatusCode(code: ReportShareError['code']): number {
   }
 }
 
-const reportShareDeps = { shareLinkRepo: reportShareLinkRepository, scanStore: store, webAppBaseUrl: WEB_APP_BASE_URL };
+const reportShareDeps = {
+  shareLinkRepo: reportShareLinkRepository,
+  scanStore: store,
+  webAppBaseUrl: WEB_APP_BASE_URL,
+  resolveBranding: (organizationId: string | undefined) => resolveReportBranding(agencyBrandingServiceDeps, organizationId),
+};
 
 app.get<{ Params: { scanId: string } }>('/scans/:scanId/report/share', { preHandler: authMiddleware.requireAuth }, async (request, reply): Promise<ReportShareStatusResponse | undefined> => {
   try {
@@ -1893,9 +2484,18 @@ app.get<{ Params: { scanId: string } }>('/scans/:scanId/report/share', { preHand
   }
 });
 
-app.post<{ Params: { scanId: string } }>('/scans/:scanId/report/share', { preHandler: authMiddleware.requireAuth }, async (request, reply): Promise<CreateReportShareResponse | undefined> => {
+app.post<{ Params: { scanId: string }; Body: import('@origami/contracts').CreateReportShareRequest }>(
+  '/scans/:scanId/report/share',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply): Promise<CreateReportShareResponse | undefined> => {
   try {
-    return await createOrRotateReportShare(reportShareDeps, request.params.scanId, await resolveOrganizationIds(request.user!.id), request.user!.id);
+    return await createOrRotateReportShare(
+      reportShareDeps,
+      request.params.scanId,
+      await resolveOrganizationIds(request.user!.id),
+      request.user!.id,
+      request.body?.expiresInDays,
+    );
   } catch (error) {
     if (error instanceof ReportShareError) return reply.status(reportShareErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
     throw error;
@@ -2728,6 +3328,607 @@ app.post<{ Params: { id: string }; Body: { query?: unknown } }>(
   }
 });
 
+/**
+ * "Select Anything" element actions (Phase 3 of the roadmap audit) —
+ * Explain/Fix/Improve/Make Responsive for one selected DOM element captured
+ * by the extension's selection overlay. Distinct from POST /components
+ * (Convert to React/Tailwind/Recreate Component — the existing, unchanged
+ * queued code-generation pipeline): this is a single grounded Q&A-shaped
+ * call, same posture as /scans/:scanId/ask. When repositoryId is supplied,
+ * this reuses Phase 9's answerRepositoryQuestion (search -> rerank ->
+ * grounded Q&A) UNCHANGED, never a second source-grounding system — see
+ * element-action-service.ts's answerElementAction.
+ */
+app.post<{ Body: { action?: unknown; evidence?: import('@origami/contracts').ComponentEvidence; instruction?: string; repositoryId?: string } }>(
+  '/elements/actions',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('AI_QUESTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const { action, evidence, instruction, repositoryId } = request.body ?? {};
+    const validActions = ['explain', 'fix', 'improve', 'make_responsive'];
+    if (typeof action !== 'string' || !validActions.includes(action)) {
+      return reply.status(400).send({ error: `action must be one of ${validActions.join(', ')}` });
+    }
+    if (!evidence?.sourceUrl || !evidence.element) {
+      return reply.status(400).send({ error: 'evidence.sourceUrl and evidence.element are required' });
+    }
+
+    const controller = new AbortController();
+    const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    reply.raw.on('close', onClose);
+
+    try {
+      let repoLookup: Parameters<typeof answerElementAction>[5];
+      if (repositoryId) {
+        const repository = await repositoryStore.getByIdAsync(repositoryId);
+        const searchDeps = defaultSearchProviderDeps();
+        repoLookup = {
+          repository,
+          stores: { embeddingStore: repositoryEmbeddingStore, indexStore: repositoryIndexStore, searchRepository: repositorySearchRepository },
+          ownerId: (await resolveOrganizationIds(request.user!.id))[0],
+          providerDeps: { embeddingProvider: searchDeps.embeddingProvider, rerankerProvider: searchDeps.rerankerProvider, qaProvider: repositoryQaProvider },
+        };
+      }
+
+      const response = await answerElementAction(
+        evidence,
+        action as import('@origami/contracts').ElementActionType,
+        instruction,
+        repositoryId,
+        { qaProvider: elementQaProvider },
+        repoLookup,
+        controller.signal,
+      );
+      return response;
+    } catch (error) {
+      if (error instanceof ElementActionError) {
+        return reply.status(elementActionErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    } finally {
+      reply.raw.off('close', onClose);
+    }
+  },
+);
+
+/**
+ * Automatic Responsive Testing (roadmap Phase 4) — renders `url` at several
+ * standard breakpoints via the existing Playwright browser-worker, then
+ * evaluates the SAME existing rule engine/Issue model per breakpoint (see
+ * responsive-test-service.ts). An on-demand check, never persisted as a
+ * scan — same quota dimension as a real scan (INSPECTION), since this is a
+ * genuine browser-worker page load, not an LLM call.
+ */
+app.post<{ Body: { url?: unknown; widths?: unknown } }>(
+  '/responsive-test',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('INSPECTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const { url, widths } = request.body ?? {};
+    if (typeof url !== 'string' || !url) {
+      return reply.status(400).send({ error: 'url is required' });
+    }
+    const parsedWidths = Array.isArray(widths) && widths.every((w) => typeof w === 'number') ? (widths as number[]) : undefined;
+
+    const controller = new AbortController();
+    const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    reply.raw.on('close', onClose);
+
+    try {
+      return await runResponsiveTest(url, parsedWidths, controller.signal);
+    } catch (error) {
+      if (error instanceof ResponsiveTestError) {
+        return reply.status(responsiveTestErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    } finally {
+      reply.raw.off('close', onClose);
+    }
+  },
+);
+
+/**
+ * Visual Comparison (roadmap Phase 5) — compares two EXISTING scan
+ * screenshots (already stored via ArtifactStore/served by GET
+ * /scans/:scanId/artifacts/:key) with a real pixel diff (pixelmatch), never
+ * a fabricated result. Same quota dimension as Responsive Testing
+ * (INSPECTION) — this is a real, if lightweight, server-side computation,
+ * not an LLM call.
+ */
+app.post<{ Body: { beforeScanId?: string; beforeArtifactKey?: string; afterScanId?: string; afterArtifactKey?: string } }>(
+  '/visual-comparison',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('INSPECTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const { beforeScanId, beforeArtifactKey, afterScanId, afterArtifactKey } = request.body ?? {};
+    if (!beforeScanId || !beforeArtifactKey || !afterScanId || !afterArtifactKey) {
+      return reply.status(400).send({ error: 'beforeScanId, beforeArtifactKey, afterScanId, and afterArtifactKey are all required' });
+    }
+
+    try {
+      const organizationIds = await resolveOrganizationIds(request.user!.id);
+      const result = await compareScanScreenshots(
+        { isScanOwnedByOrganizations: async (scanId, orgIds) => Boolean(await store.getScanForOrganizationsAsync(scanId, orgIds)) },
+        artifactStore,
+        { beforeScanId, beforeArtifactKey, afterScanId, afterArtifactKey },
+        organizationIds,
+      );
+      return result;
+    } catch (error) {
+      if (error instanceof VisualComparisonError) {
+        return reply.status(visualComparisonErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+/**
+ * Create GitHub Issue (roadmap Phase 7) — read-only preview for the
+ * confirmation dialog, showing the exact title/body/labels
+ * POST /issues/:issueId/create-github-issue would use, before anything is
+ * actually sent to GitHub.
+ */
+app.get<{ Params: { issueId: string }; Querystring: { repositoryId?: string } }>(
+  '/issues/:issueId/github-issue-preview',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    const found = await store.getIssueForOrganizationsAsync(request.params.issueId, organizationIds);
+    if (!found) return reply.status(404).send({ error: 'Finding not found', errorCode: 'FINDING_NOT_FOUND' });
+
+    const { repositoryId } = request.query;
+    if (!repositoryId) return reply.status(400).send({ error: 'repositoryId is required' });
+
+    try {
+      const repository = await repositoryStore.getByIdAsync(repositoryId);
+      if (!repository) throw new GitHubIssueError('Repository not found.', 'REPOSITORY_NOT_FOUND');
+      if (!canAccessRepository(repository.organizationId, organizationIds[0])) {
+        throw new GitHubIssueError('Repository not found.', 'REPOSITORY_ACCESS_DENIED');
+      }
+      const healthScore = isReportReady(found.scan.status) ? found.scan.healthScore.overallScore : null;
+      return buildGitHubIssuePreview(repository, found.issue, found.scan.url, healthScore);
+    } catch (error) {
+      if (error instanceof GitHubIssueError) {
+        return reply.status(gitHubIssueErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+/**
+ * Create GitHub Issue (roadmap Phase 7) — DISTINCT from Fix with AI ->
+ * Create Pull Request: creates a plain GitHub issue from an Origami Lens
+ * finding, never a branch/commit/PR. Resolves repositoryId -> owner/repo ->
+ * the SAME per-user GitHub App credential chain PR creation already uses
+ * (resolveRepositoryProvider, unchanged) — never assumes "the first" GitHub
+ * account, never bypasses GitHub's own permission model.
+ */
+app.post<{ Params: { issueId: string }; Body: import('@origami/contracts').CreateGitHubIssueRequest }>(
+  '/issues/:issueId/create-github-issue',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    const found = await store.getIssueForOrganizationsAsync(request.params.issueId, organizationIds);
+    if (!found) return reply.status(404).send({ error: 'Finding not found', errorCode: 'FINDING_NOT_FOUND' });
+
+    const { repositoryId, title, body, labels } = request.body ?? {};
+    if (!repositoryId) return reply.status(400).send({ error: 'repositoryId is required' });
+
+    try {
+      const repository = await repositoryStore.getByIdAsync(repositoryId);
+      if (!repository) throw new GitHubIssueError('Repository not found.', 'REPOSITORY_NOT_FOUND');
+
+      let provider;
+      try {
+        provider = resolveRepositoryProvider(repository.provider);
+      } catch {
+        throw new GitHubIssueError(`Creating a GitHub issue is not yet supported for provider "${repository.provider}".`, 'PROVIDER_UNSUPPORTED');
+      }
+
+      const healthScore = isReportReady(found.scan.status) ? found.scan.healthScore.overallScore : null;
+      const response = await createGitHubIssueForFinding(
+        request.user!.id,
+        repository,
+        organizationIds[0],
+        found.issue,
+        found.scan.url,
+        healthScore,
+        { title, body, labels },
+        {
+          provider,
+          store: {
+            findGitHubIssueLink: (issueId, repositoryId, providerName) => store.findGitHubIssueLinkAsync(issueId, repositoryId, providerName),
+            linkGitHubIssue: (issueId, link) => store.linkGitHubIssueAsync(issueId, link),
+          },
+        },
+      );
+      return response;
+    } catch (error) {
+      if (error instanceof GitHubIssueError) {
+        return reply.status(gitHubIssueErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+/* ------------------------------------------------------------------------ */
+/* Continuous Website Monitoring (V3) — a workspace-owned, scheduled        */
+/* re-scan of a saved website, reusing the existing scan pipeline/          */
+/* HealthScore/issue model (monitoring/*.ts) as its sole source of scan     */
+/* data. "Create/manage" actions reuse canConfigureRepository (OWNER/ADMIN) */
+/* — the same permission connecting/disconnecting a repository already     */
+/* uses, since this is the same kind of configuration action. "Run Now"    */
+/* reuses canRunScanOrAI (OWNER/ADMIN/MEMBER), the same permission an       */
+/* ordinary scan already requires, and the SAME INSPECTION usage quota.    */
+/* ------------------------------------------------------------------------ */
+
+app.post<{ Body: import('@origami/contracts').CreateMonitoredSiteRequest }>(
+  '/monitored-sites',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canConfigureRepository, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('INSPECTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+    if (!organizationId) return reply.status(400).send({ error: 'No workspace found for this account.' });
+    try {
+      const site = await monitoredSiteService.create(request.user!.id, organizationId, request.body ?? {});
+      return reply.status(201).send(site);
+    } catch (error) {
+      if (error instanceof MonitoredSiteError) {
+        return reply.status(monitoredSiteErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.get('/monitored-sites', { preHandler: authMiddleware.requireAuth }, async (request) => {
+  const organizationIds = await resolveOrganizationIds(request.user!.id);
+  return monitoredSiteService.listSummariesForOrganizations(organizationIds);
+});
+
+app.get<{ Params: { id: string } }>('/monitored-sites/:id', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+  const organizationIds = await resolveOrganizationIds(request.user!.id);
+  const detail = await monitoredSiteService.getDetailForOrganizations(request.params.id, organizationIds);
+  if (!detail) return reply.status(404).send({ error: 'Monitored website not found.', errorCode: 'MONITORED_SITE_NOT_FOUND' });
+  return detail;
+});
+
+app.patch<{ Params: { id: string }; Body: import('@origami/contracts').UpdateMonitoredSiteRequest }>(
+  '/monitored-sites/:id',
+  { preHandler: [authMiddleware.requireAuth, workspaceRoleMiddleware.requireRole(canConfigureRepository, resolveOrganizationIdForAuthenticatedRequest)] },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    try {
+      return await monitoredSiteService.update(request.params.id, organizationIds, request.body ?? {});
+    } catch (error) {
+      if (error instanceof MonitoredSiteError) {
+        return reply.status(monitoredSiteErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.delete<{ Params: { id: string } }>(
+  '/monitored-sites/:id',
+  { preHandler: [authMiddleware.requireAuth, workspaceRoleMiddleware.requireRole(canConfigureRepository, resolveOrganizationIdForAuthenticatedRequest)] },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    try {
+      await monitoredSiteService.delete(request.params.id, organizationIds);
+      return reply.status(204).send();
+    } catch (error) {
+      if (error instanceof MonitoredSiteError) {
+        return reply.status(monitoredSiteErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.post<{ Params: { id: string } }>(
+  '/monitored-sites/:id/run',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('INSPECTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    try {
+      const result = await monitoredSiteService.runNow(request.params.id, organizationIds, request.user!.id);
+      return result;
+    } catch (error) {
+      if (error instanceof MonitoredSiteError) {
+        return reply.status(monitoredSiteErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.post<{ Params: { id: string } }>(
+  '/monitored-sites/:id/pause',
+  { preHandler: [authMiddleware.requireAuth, workspaceRoleMiddleware.requireRole(canConfigureRepository, resolveOrganizationIdForAuthenticatedRequest)] },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    try {
+      return await monitoredSiteService.pause(request.params.id, organizationIds);
+    } catch (error) {
+      if (error instanceof MonitoredSiteError) {
+        return reply.status(monitoredSiteErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.post<{ Params: { id: string } }>(
+  '/monitored-sites/:id/resume',
+  { preHandler: [authMiddleware.requireAuth, workspaceRoleMiddleware.requireRole(canConfigureRepository, resolveOrganizationIdForAuthenticatedRequest)] },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    try {
+      return await monitoredSiteService.resume(request.params.id, organizationIds);
+    } catch (error) {
+      if (error instanceof MonitoredSiteError) {
+        return reply.status(monitoredSiteErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.get<{ Params: { id: string } }>('/monitored-sites/:id/history', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+  const organizationIds = await resolveOrganizationIds(request.user!.id);
+  const detail = await monitoredSiteService.getDetailForOrganizations(request.params.id, organizationIds);
+  if (!detail) return reply.status(404).send({ error: 'Monitored website not found.', errorCode: 'MONITORED_SITE_NOT_FOUND' });
+  return { scanHistory: detail.scanHistory };
+});
+
+app.get<{ Params: { id: string } }>('/monitored-sites/:id/events', { preHandler: authMiddleware.requireAuth }, async (request, reply) => {
+  const organizationIds = await resolveOrganizationIds(request.user!.id);
+  const detail = await monitoredSiteService.getDetailForOrganizations(request.params.id, organizationIds);
+  if (!detail) return reply.status(404).send({ error: 'Monitored website not found.', errorCode: 'MONITORED_SITE_NOT_FOUND' });
+  return { events: detail.events };
+});
+
+/**
+ * "Why did my website score drop?" — explains an already-detected
+ * regression (monitoring-ask-service.ts never decides whether one exists).
+ * Gated by the same AI_QUESTION quota every other AI explanation feature
+ * uses (e.g. "Ask About This Page"), not a new metering concept.
+ */
+app.post<{ Params: { id: string }; Body: import('@origami/contracts').MonitoringAskRequest }>(
+  '/monitored-sites/:id/ask',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canReadWorkspaceResource, resolveOrganizationIdForAuthenticatedRequest),
+      usageLimitMiddleware.requireQuota('AI_QUESTION', resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    const controller = new AbortController();
+    const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    reply.raw.on('close', onClose);
+    try {
+      return await answerMonitoringQuestion(
+        {
+          monitoredSiteRepo: monitoredSiteRepository,
+          eventRepo: monitoringEventRepository,
+          getScan: (scanId) => repo.getScan(scanId),
+          getPreviousCompletedScanForMonitoredSite: (monitoredSiteId, beforeScanId) => repo.getPreviousCompletedScanForMonitoredSite(monitoredSiteId, beforeScanId),
+        },
+        request.params.id,
+        organizationIds,
+        request.body?.question,
+        { qaProvider: monitoringAskProvider },
+        controller.signal,
+      );
+    } catch (error) {
+      if (error instanceof MonitoringAskError) {
+        return reply.status(monitoringAskErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    } finally {
+      reply.raw.off('close', onClose);
+    }
+  },
+);
+
+/**
+ * Origami Lead Generation — "Talk to Origami" (roadmap Phase 8). A
+ * non-aggressive CTA submission, always associated with the caller's own
+ * organization (never client-supplied) and, when scanId is given, that
+ * scan's real domain/Health Score/issue counts — never client-supplied
+ * context. Never blocks on the internal notification email failing.
+ */
+app.post<{ Body: { name?: unknown; email?: unknown; company?: unknown; message?: unknown; scanId?: unknown; isProspectAudit?: unknown } }>(
+  '/leads',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    try {
+      const organizationId = await resolveOrganizationIdForAuthenticatedRequest(request);
+      const response = await createLead(
+        organizationId,
+        request.body ?? {},
+        {
+          leadRepo: leadRepository,
+          getScanForOrganizations: (scanId, organizationIds) => store.getScanForOrganizationsAsync(scanId, organizationIds),
+          notificationEmail: LEADS_NOTIFICATION_EMAIL,
+          canUseAgencyFeatures: (orgId) => entitlementService.canManageClientWorkspaces(orgId),
+        },
+      );
+      return reply.status(201).send(response);
+    } catch (error) {
+      if (error instanceof LeadError) {
+        return reply.status(leadErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+/**
+ * Create Bug Report — a self-contained incident record captured from the
+ * extension on the REAL page the user was viewing (migration 038). When
+ * linkedIssueId is given, that issue is loaded (organization-scoped, same
+ * as every other issue route) and its OWN problem/cause/suggestedFix/
+ * category/severity are reused verbatim — never a client-supplied value,
+ * never regenerated.
+ */
+app.post<{ Body: import('@origami/contracts').CreateBugReportRequest }>(
+  '/bug-reports',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    try {
+      const organizationIds = await resolveOrganizationIds(request.user!.id);
+      const body = (request.body ?? {}) as import('@origami/contracts').CreateBugReportRequest;
+
+      let linkedIssue: { suggestedFix?: string; category: import('@origami/contracts').IssueCategory; severity: import('@origami/contracts').Severity } | undefined;
+      if (body.linkedIssueId) {
+        const found = await store.getIssueForOrganizationsAsync(body.linkedIssueId, organizationIds);
+        if (found) {
+          linkedIssue = { suggestedFix: found.issue.suggestedFix, category: found.issue.category, severity: found.issue.severity };
+        }
+      }
+
+      const response = await createBugReport(
+        body,
+        organizationIds[0],
+        request.user!.id,
+        { repo: bugReportRepository, artifactStore },
+        WEB_APP_BASE_URL,
+        linkedIssue,
+      );
+      return reply.status(201).send(response);
+    } catch (error) {
+      if (error instanceof BugReportError) {
+        return reply.status(bugReportErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.get<{ Params: { id: string } }>(
+  '/bug-reports/:id',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    try {
+      const report = await getBugReport(request.params.id, await resolveOrganizationIds(request.user!.id), bugReportRepository);
+      return report;
+    } catch (error) {
+      if (error instanceof BugReportError) {
+        return reply.status(bugReportErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
+app.get<{ Params: { id: string } }>(
+  '/bug-reports/:id/screenshot',
+  { preHandler: authMiddleware.requireAuth },
+  async (request, reply) => {
+    const report = await bugReportRepository.getByIdForOrganizationsAsync(request.params.id, await resolveOrganizationIds(request.user!.id));
+    if (!report || !report.hasScreenshot) {
+      return reply.status(404).send({ error: 'Screenshot not found' });
+    }
+    const filePath = artifactStore.getArtifactPath(report.id, 'screenshot.jpg');
+    if (!filePath) {
+      return reply.status(404).send({ error: 'Screenshot not found' });
+    }
+    const data = fs.readFileSync(filePath);
+    return reply.type('image/jpeg').send(data);
+  },
+);
+
+/**
+ * Create GitHub Issue from a Bug Report — DISTINCT from the scan-finding
+ * version above: builds the issue body from the bug report's own fields,
+ * reusing the SAME resolveRepositoryProvider credential chain/error mapping
+ * (never a second GitHub integration).
+ */
+app.post<{ Params: { id: string }; Body: import('@origami/contracts').CreateBugReportGitHubIssueRequest }>(
+  '/bug-reports/:id/create-github-issue',
+  {
+    preHandler: [
+      authMiddleware.requireAuth,
+      workspaceRoleMiddleware.requireRole(canRunScanOrAI, resolveOrganizationIdForAuthenticatedRequest),
+    ],
+  },
+  async (request, reply) => {
+    const organizationIds = await resolveOrganizationIds(request.user!.id);
+    const report = await bugReportRepository.getByIdForOrganizationsAsync(request.params.id, organizationIds);
+    if (!report) return reply.status(404).send({ error: 'Bug report not found', errorCode: 'BUG_REPORT_NOT_FOUND' });
+
+    const { repositoryId } = request.body ?? {};
+    if (!repositoryId) return reply.status(400).send({ error: 'repositoryId is required' });
+
+    try {
+      const repository = await repositoryStore.getByIdAsync(repositoryId);
+      if (!repository) throw new GitHubIssueError('Repository not found.', 'REPOSITORY_NOT_FOUND');
+      let provider;
+      try {
+        provider = resolveRepositoryProvider(repository.provider);
+      } catch {
+        throw new GitHubIssueError(`Creating a GitHub issue is not yet supported for provider "${repository.provider}".`, 'PROVIDER_UNSUPPORTED');
+      }
+      const response = await createGitHubIssueFromBugReport(
+        request.user!.id,
+        repository,
+        organizationIds[0],
+        report,
+        { provider, repo: bugReportRepository },
+      );
+      return response;
+    } catch (error) {
+      if (error instanceof GitHubIssueError) {
+        return reply.status(gitHubIssueErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+      }
+      throw error;
+    }
+  },
+);
+
 /*
  * Repository Feature — Phase 10: AI issue analysis + code fix proposal for
  * an EXISTING, persisted website-scan finding (never a client-supplied
@@ -2781,7 +3982,7 @@ app.post<{ Params: { id: string; findingId: string }; Body: { instruction?: unkn
       return response;
     } catch (error) {
       if (error instanceof FindingFixError) {
-        return reply.status(findingFixErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+        return reply.status(findingFixErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code, diagnostic: error.diagnostic });
       }
       throw error;
     } finally {
@@ -2831,7 +4032,7 @@ app.post<{ Params: { id: string; findingId: string }; Body: { proposal?: unknown
       return { status, repositoryId, findingId, baseCommitSha, changedFiles, diff, validation, lineGrounding };
     } catch (error) {
       if (error instanceof FixApplicationError) {
-        return reply.status(fixApplicationErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+        return reply.status(fixApplicationErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code, syntaxError: error.syntaxError });
       }
       throw error;
     } finally {
@@ -2871,11 +4072,53 @@ app.post<{ Params: { id: string; findingId: string }; Body: { proposal?: unknown
       );
     } catch (error) {
       if (error instanceof FixWorkflowError) {
-        return reply.status(fixWorkflowErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+        return reply.status(fixWorkflowErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code, syntaxError: error.syntaxError });
       }
       throw error;
     } finally {
       reply.raw.off('close', onClose);
+    }
+  },
+);
+
+/*
+ * Read-only preview of which PR strategy an approval would use for this
+ * repository (GITHUB_APP_DIRECT / USER_DIRECT / USER_FORK /
+ * ADMIN_APPROVAL_REQUIRED), resolved for the CURRENT authenticated user —
+ * never a global/cached value, and never the first-connected-account
+ * shortcut (see repository-github-provider-client.ts's resolvePrStrategy).
+ * Lets the Fix-with-AI UI show which method will be used BEFORE the user
+ * approves a fix. `preview: true` means no fork is actually created here —
+ * only the real approval (below) does that. Same role gate as approval
+ * itself (canMutateRepository): previewing which credential WOULD be used
+ * to mutate the repository is scoped the same as actually mutating it.
+ */
+app.get<{ Params: { id: string } }>(
+  '/repositories/:id/pr-strategy',
+  { preHandler: [authMiddleware.requireAuth, workspaceRoleMiddleware.requireRole(canMutateRepository, resolveOrganizationIdForAuthenticatedRequest)] },
+  async (request, reply) => {
+    const repository = await repositoryStore.getByIdForOrganizationsAsync(request.params.id, await resolveOrganizationIds(request.user!.id));
+    if (!repository) return reply.status(404).send({ error: 'Repository not found' });
+
+    let provider;
+    try {
+      provider = resolveRepositoryProvider(repository.provider);
+    } catch {
+      return reply.send({ strategy: 'ADMIN_APPROVAL_REQUIRED', detail: `Pull request creation is not yet supported for provider "${repository.provider}".` });
+    }
+    if (!provider.resolvePrStrategy) {
+      // GitLab/Bitbucket have only one credential path — always "direct", labeled with the provider's own PR strategy value for UI consistency.
+      return reply.send({ strategy: 'GITHUB_APP_DIRECT', detail: `Uses your connected ${repository.provider === 'GITLAB' ? 'GitLab' : 'Bitbucket'} authorization.` });
+    }
+
+    const parsedUrl = parseRepositoryUrl(repository.repoUrl);
+    if (!parsedUrl.ok) return reply.send({ strategy: 'ADMIN_APPROVAL_REQUIRED', detail: 'Could not resolve the repository owner/name from its URL.' });
+
+    try {
+      const resolved = await provider.resolvePrStrategy(request.user!.id, parsedUrl.value.owner, parsedUrl.value.name, undefined, { preview: true });
+      return reply.send({ strategy: resolved.strategy, detail: resolved.detail });
+    } catch (error) {
+      return reply.send({ strategy: 'ADMIN_APPROVAL_REQUIRED', detail: error instanceof Error ? error.message : 'Could not determine how a pull request would be created for this repository.' });
     }
   },
 );
@@ -2948,7 +4191,7 @@ app.post<{ Params: { id: string; findingId: string }; Body: { applicationId?: st
       return result;
     } catch (error) {
       if (error instanceof FixWorkflowError) {
-        return reply.status(fixWorkflowErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code });
+        return reply.status(fixWorkflowErrorStatusCode(error.code)).send({ error: error.message, errorCode: error.code, syntaxError: error.syntaxError });
       }
       throw error;
     } finally {

@@ -1020,79 +1020,323 @@ code { background: var(--surface-elevated); padding: 2px 6px; border-radius: 6px
 }
 
 .persona-onboarding {
+  position: relative;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
-  max-width: 560px;
-  margin: 64px auto;
-  padding: 32px;
-  text-align: left;
+  align-items: center;
+  gap: 28px;
+  max-width: 880px;
+  margin: 48px auto;
+  padding: 40px 44px 44px;
+  text-align: center;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 20px;
   background: var(--surface-elevated);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
 }
 
-.persona-onboarding h1 {
-  font-size: 20px;
+/* Understated premium glow, layered on top of (not replacing) the global
+   body background's own top-left radial gradient — two soft, very low-
+   opacity blobs anchored to opposite corners of this card only. */
+.persona-onboarding-glow {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(420px 220px at 88% -10%, rgba(109, 94, 246, 0.10), transparent 70%),
+    radial-gradient(360px 200px at 8% 108%, rgba(96, 165, 250, 0.09), transparent 70%);
+}
+
+.persona-onboarding > :not(.persona-onboarding-glow) {
+  position: relative;
+  z-index: 1;
+}
+
+/* Visual-only progress indicator — no routing, no backend steps; "Your
+   role" is the only reachable state today (see PersonaOnboarding.tsx). */
+.persona-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
   margin: 0;
+  padding: 0;
 }
 
-.persona-onboarding p {
+.persona-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.persona-step-index {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.persona-step.active .persona-step-index {
+  background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+  color: #fff;
+  border-color: transparent;
+}
+
+.persona-step-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.persona-step.active .persona-step-label {
+  color: var(--text-primary);
+}
+
+.persona-step-connector {
+  width: 36px;
+  height: 1px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+.persona-heading h1 {
+  font-size: 1.7rem;
+  font-weight: 800;
+  margin: 0;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.persona-heading-accent {
+  background: linear-gradient(135deg, var(--primary), #7dd3fc);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.persona-heading p {
   color: var(--text-secondary);
-  margin: 0;
+  margin: 10px 0 0;
+  font-size: 0.95rem;
+  max-width: 560px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .persona-options {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
   width: 100%;
 }
 
-@media (max-width: 480px) {
-  .persona-options {
-    grid-template-columns: 1fr;
-  }
+@media (max-width: 860px) {
+  .persona-options { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 560px) {
+  .persona-options { grid-template-columns: 1fr; }
 }
 
 .persona-option {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: 4px;
+  padding: 18px 18px 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 16px;
   background: var(--surface);
   color: var(--text-primary);
   cursor: pointer;
   text-align: left;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
 }
 
-.persona-option:hover:not(:disabled) {
+.persona-option:hover:not(:disabled):not(.selected) {
   border-color: var(--primary);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-1);
+}
+
+.persona-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .persona-option:disabled {
   opacity: 0.6;
   cursor: default;
+  transform: none;
+}
+
+.persona-option.selected {
+  border-color: var(--primary);
+  background: var(--primary-subtle);
+  box-shadow: 0 0 0 1px var(--primary), var(--shadow-1);
+}
+
+.persona-option-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.persona-option-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--primary-subtle);
+  color: var(--primary);
+  flex-shrink: 0;
+  transition: transform 160ms ease;
+}
+
+.persona-option.selected .persona-option-icon {
+  background: var(--primary);
+  color: #fff;
+}
+
+.persona-option:hover:not(:disabled):not(.selected) .persona-option-icon {
+  transform: scale(1.06);
+}
+
+.persona-option-check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  flex-shrink: 0;
+  animation: persona-check-in 220ms ease;
+}
+
+@keyframes persona-check-in {
+  from { transform: scale(0.4); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
 }
 
 .persona-option-label {
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: 700;
+  font-size: 0.98rem;
+  margin-top: 10px;
 }
 
 .persona-option-description {
-  font-size: 12px;
+  font-size: 0.82rem;
   color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.persona-option-arrow {
+  align-self: flex-end;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--surface-hover);
+  margin-top: 8px;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 160ms ease, transform 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.persona-option:hover:not(:disabled) .persona-option-arrow,
+.persona-option.selected .persona-option-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.persona-option.selected .persona-option-arrow {
+  background: var(--primary);
+  color: #fff;
 }
 
 .persona-error {
   color: var(--danger);
-  font-size: 13px;
+  font-size: 0.85rem;
   margin: 0;
+}
+
+.persona-continue-row {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.persona-continue {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 26px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-hover));
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.persona-continue:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px -6px rgba(109, 94, 246, 0.45);
+}
+
+.persona-continue:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.persona-continue:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .persona-option,
+  .persona-option-icon,
+  .persona-option-arrow,
+  .persona-continue,
+  .persona-option-check {
+    transition: none;
+    animation: none;
+  }
+  .persona-option:hover:not(:disabled):not(.selected) {
+    transform: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .persona-onboarding {
+    margin: 20px auto;
+    padding: 28px 20px 32px;
+    border-radius: 16px;
+    gap: 22px;
+  }
+  .persona-heading h1 { font-size: 1.35rem; }
+  .persona-step-label { display: none; }
+  .persona-step-connector { width: 18px; }
 }
 
 .persona-cta {
@@ -1233,25 +1477,6 @@ code { background: var(--surface-elevated); padding: 2px 6px; border-radius: 6px
   gap: 8px;
   flex-shrink: 0;
 }
-
-.provider-card-connect {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--primary);
-  font-size: 0.8rem;
-  font-weight: 700;
-  text-decoration: none;
-  flex-shrink: 0;
-  transition: background-color 180ms ease, border-color 180ms ease;
-}
-
-.provider-card-connect:hover { background: var(--primary-subtle); border-color: var(--primary); }
-.provider-card-connect svg { flex-shrink: 0; }
 
 .provider-connection-warning {
   margin: 0;
@@ -1923,6 +2148,9 @@ code { background: var(--surface-elevated); padding: 2px 6px; border-radius: 6px
   color: var(--text-primary);
 }
 
+/* Agency white-label branding (V4) — sized to match the OrigamiLensIcon it replaces (size={28}). */
+.shared-report-brand-logo { height: 28px; width: auto; max-width: 140px; object-fit: contain; }
+
 .shared-report-content {
   flex: 1;
   max-width: 720px;
@@ -1999,6 +2227,16 @@ code { background: var(--surface-elevated); padding: 2px 6px; border-radius: 6px
 .shared-report-summary-cards {
   margin-bottom: 24px;
 }
+
+.shared-report-view-toggle { display: flex; gap: 6px; margin-bottom: 20px; }
+.shared-report-view-toggle button {
+  padding: 6px 14px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-muted); font-size: 0.8rem; font-weight: 600; cursor: pointer;
+}
+.shared-report-view-toggle button.active { background: var(--primary-subtle); color: var(--primary); border-color: var(--primary); }
+
+.shared-report-screenshot { margin: 12px 0 24px; }
+.shared-report-screenshot img { width: 100%; max-width: 720px; border-radius: 12px; border: 1px solid var(--border); display: block; }
 
 .shared-report-issues h2 {
   font-size: 1rem;
@@ -2897,7 +3135,219 @@ button:disabled {
   margin-top: 12px;
 }
 
+.pr-strategy-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pr-strategy-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--primary-subtle);
+  color: var(--primary);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.pr-strategy-badge svg { flex-shrink: 0; }
+.pr-strategy-badge.warn { background: var(--warning-subtle); color: var(--warning); }
+
+.pr-strategy-badge.small {
+  padding: 3px 8px;
+  font-size: 0.7rem;
+  gap: 4px;
+}
+.pr-strategy-badge.small svg { width: 12px; height: 12px; }
+
+.repo-pr-strategy-slot {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+}
+
+.repo-pr-strategy-link {
+  text-decoration: none;
+  border-radius: 999px;
+  transition: box-shadow 150ms ease;
+}
+.repo-pr-strategy-link:hover .pr-strategy-badge,
+.repo-pr-strategy-link:focus-visible .pr-strategy-badge {
+  box-shadow: 0 0 0 2px var(--warning);
+}
+.repo-pr-strategy-link:focus-visible { outline: none; }
+
+.repo-pr-strategy-loading {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  letter-spacing: 1px;
+}
+
+.admin-approval-required-notice {
+  padding: 14px 16px;
+  border: 1px solid var(--warning-subtle);
+  border-radius: 12px;
+  background: var(--warning-subtle);
+}
+.admin-approval-required-notice .muted { color: var(--text-muted); }
+
+.fix-source-grounding {
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle, var(--border));
+  border-radius: 12px;
+  background: var(--surface-elevated);
+  margin: 10px 0;
+}
+.fix-source-grounding-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.fix-confidence-badge.fix-confidence-high { background: var(--success-subtle); color: var(--success); }
+.fix-confidence-badge.fix-confidence-medium { background: var(--warning-subtle); color: var(--warning); }
+.fix-confidence-badge.fix-confidence-low { background: var(--danger-subtle); color: var(--danger); }
+.fix-source-grounding-low { border-color: var(--danger-subtle); background: var(--danger-subtle); }
+.fix-source-grounding-evidence { margin-top: 8px; font-size: 0.82rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.fix-evidence-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-subtle);
+  color: var(--success);
+  font-size: 0.76rem;
+}
+.fix-source-grounding-note { margin-top: 6px; font-size: 0.8rem; }
+
+.fix-validation-error {
+  padding: 14px 16px;
+  border: 1px solid var(--danger-subtle);
+  border-radius: 12px;
+  background: var(--danger-subtle);
+}
+.fix-validation-error .detail-action-message { color: var(--danger); margin-top: 0; }
+.fix-validation-error .repository-ask-answer { margin-top: 8px; }
+.fix-validation-error .repository-commit-sha { word-break: break-all; }
+
 .ai-response { margin-top: 12px; font-size: 0.9rem; color: var(--muted); white-space: pre-wrap; }
+.ai-response-error { color: var(--danger); }
+
+.responsive-viewport-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.responsive-viewport-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-elevated);
+  overflow: hidden;
+}
+.responsive-viewport-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+.responsive-viewport-header:disabled { cursor: default; }
+.responsive-viewport-label { font-weight: 600; }
+.responsive-viewport-count { font-size: 0.82rem; font-weight: 700; padding: 2px 10px; border-radius: 999px; }
+.responsive-viewport-count.ok { background: var(--success-subtle); color: var(--success); }
+.responsive-viewport-count.has-issues { background: var(--danger-subtle); color: var(--danger); }
+.responsive-viewport-issues { border-top: 1px solid var(--border); padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.responsive-issue-row { padding: 10px; }
+
+.visual-comparison-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 12px; }
+.visual-comparison-controls label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: var(--text-muted); }
+.visual-comparison-controls select {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+  padding: 8px 10px; border-radius: 8px; font: inherit;
+}
+.visual-comparison-result { margin-top: 16px; }
+.visual-comparison-summary { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.visual-comparison-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.visual-comparison-tabs button.active { background: var(--primary-subtle); color: var(--primary); border-color: var(--primary); }
+.visual-comparison-images { display: flex; gap: 12px; flex-wrap: wrap; }
+.visual-comparison-images figure { margin: 0; flex: 1; min-width: 240px; }
+.visual-comparison-images img { width: 100%; border-radius: 10px; border: 1px solid var(--border); display: block; }
+.visual-comparison-images figcaption { text-align: center; font-size: 0.8rem; color: var(--text-muted); margin-top: 6px; }
+.visual-comparison-overlay { position: relative; display: inline-block; overflow: auto; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; }
+.visual-comparison-overlay img { display: block; }
+.visual-comparison-region {
+  position: absolute; border: 2px solid var(--danger); background: rgba(220, 38, 38, 0.15); pointer-events: none;
+}
+
+/* Trigger now lives in the issue header's top action row (IssueHeader.tsx)
+   — its own dialog renders via createPortal using the SAME
+   .report-share-overlay/.report-share-dialog modal shell ReportShareModal
+   already defines, so only this small icon+label layout rule is needed here. */
+.github-issue-trigger { display: inline-flex; align-items: center; gap: 6px; }
+/* Bugfix (duplicate GitHub issues): the trigger becomes a direct "View" link once a GitHub Issue already exists, with a small "+" affordance to file another in a second repository — see CreateGitHubIssueButton.tsx. */
+.github-issue-trigger-group { display: inline-flex; align-items: center; gap: 4px; }
+.github-issue-trigger-more {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; font-size: 1rem; line-height: 1;
+}
+.github-issue-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 12px; }
+.github-issue-field input, .github-issue-field textarea {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; resize: vertical;
+}
+
+/* "Create GitHub Issue" in-context setup modal — repository selection,
+   GitHub authorization/access steps, confirm, success. Same
+   .report-share-overlay/.report-share-dialog shell ReportShareModal already
+   defines; everything below is this flow's own content, built entirely
+   from existing tokens (no new colors/shadows/radii). */
+.github-issue-modal { width: min(480px, 100%); max-height: 85vh; overflow-y: auto; }
+
+.github-issue-steps { margin: 4px 0 16px; }
+
+.github-issue-step h3 { font-size: 1rem; margin: 0 0 6px; }
+.github-issue-step > .page-subtitle { margin-bottom: 10px; }
+
+.github-issue-repo-list {
+  display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; margin-bottom: 10px;
+}
+
+.github-issue-repo-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+.github-issue-repo-row:hover { background: var(--surface-hover); }
+.github-issue-repo-row.selected { border-color: var(--primary); background: var(--primary-subtle); }
+.github-issue-repo-row input[type='radio'] { accent-color: var(--primary); width: 16px; height: 16px; flex-shrink: 0; }
+.github-issue-repo-icon { display: flex; flex-shrink: 0; color: var(--text-muted); }
+.github-issue-repo-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.github-issue-repo-name { font-weight: 700; font-size: 0.88rem; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.github-issue-repo-meta { font-size: 0.75rem; color: var(--text-muted); }
+.github-issue-repo-linked-badge {
+  flex-shrink: 0; font-size: 0.72rem; font-weight: 700; color: var(--success);
+  background: var(--success-subtle); border-radius: 999px; padding: 3px 9px;
+}
+
+.github-issue-connect-new { align-self: flex-start; margin-bottom: 12px; }
+.github-issue-connect-form { margin-bottom: 12px; }
+
+.github-issue-change-repo {
+  background: none; border: none; padding: 0; color: var(--primary); font-weight: 700; font-size: inherit; cursor: pointer; text-decoration: underline;
+}
+
+.talk-to-origami-prompt { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.talk-to-origami-prompt h3 { margin: 0 0 2px; }
+.talk-to-origami-cta h3 { margin-top: 0; }
 .detail-action-message {
   margin-top: 12px;
   font-size: 0.8rem;
@@ -2985,6 +3435,16 @@ button:disabled {
 .occurrences-list pre {
   font-size: 0.75rem;
   overflow-x: auto;
+}
+
+/* Create Bug Report — reproduction steps list on BugReportDetailPage. */
+.repro-steps-list {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
 }
 
 /* Screenshot -> Code */
@@ -6600,3 +7060,11 @@ button:disabled {
   .evidence-row-text { order: 3; flex-basis: 100%; }
   .sidebar-meta-row dd { max-width: 55%; }
 }
+
+/* Continuous Website Monitoring (V3) — built entirely from existing tokens/classes (status-pill, record-table, ai-section, repo-summary-*); only these small additions were genuinely new. */
+.monitoring-enable-toggle { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text); margin: 12px 0; }
+.monitoring-enable-toggle input { width: 16px; height: 16px; accent-color: var(--primary); }
+.monitoring-score-row { display: flex; align-items: center; gap: 20px; }
+.record-secondary.negative { color: var(--danger); font-weight: 600; }
+.record-secondary.positive { color: var(--success); font-weight: 600; }
+.repo-summary-tile-count-small { font-size: 1.1rem; font-weight: 700; color: var(--text-primary); display: block; }

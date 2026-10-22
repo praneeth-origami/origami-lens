@@ -4,6 +4,8 @@ import type { Issue, PageScanRecord } from '@origami/contracts';
 import { fetchPageScanDetail } from '../api/client';
 import { ErrorState, LoadingSkeleton } from '../components/StateViews';
 import { IssueList } from '../components/IssueList';
+import { PageAskAi } from '../components/PageAskAi';
+import { ResponsiveTestPanel } from '../components/ResponsiveTestPanel';
 
 export function PageScanDetailPage() {
   const { scanId, pageScanId } = useParams();
@@ -53,6 +55,8 @@ export function PageScanDetailPage() {
         </div>
         {page.error && <p className="scan-error">{page.error}</p>}
       </header>
+      <PageAskAi scanId={scanId!} pageScanId={pageScanId} />
+      <ResponsiveTestPanel url={page.url} />
       <IssueList issues={issues} />
     </div>
   );
