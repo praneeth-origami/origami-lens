@@ -81,6 +81,28 @@ export interface Issue {
    * own — this is always an explicit choice, never inferred/guessed.
    */
   repositoryId?: string;
+  /**
+   * Every GitHub Issue already filed for this finding, at most one per
+   * (repositoryId, provider) pair (migration 040's unique constraint) — a
+   * finding may legitimately be filed in more than one connected
+   * repository, but never filed twice in the SAME repository. Populated by
+   * the store, never written directly by a client. Distinct from
+   * `repositoryId` above (singular, Fix-with-AI's own target-repository
+   * field) — filing a GitHub issue never changes which repository
+   * Fix-with-AI targets, and vice versa.
+   */
+  githubIssueLinks?: GitHubIssueLink[];
+}
+
+/** One already-created GitHub Issue for a finding, scoped to a single repository (see Issue.githubIssueLinks). */
+export interface GitHubIssueLink {
+  repositoryId: string;
+  provider: string;
+  githubOwner: string;
+  githubRepository: string;
+  issueNumber: number;
+  issueUrl: string;
+  createdAt: string;
 }
 
 export interface CategoryScore {
@@ -173,6 +195,8 @@ export interface BrowserEvidence {
     overflowWidth?: number;
     elementsOutsideViewport: DomElement[];
     fixedWidthElements: DomElement[];
+    /** Automatic Responsive Testing (roadmap Phase 4) — pairs of prominent nav/header/logo-ish elements whose bounding boxes meaningfully intersect (e.g. "navigation overlaps logo"). Optional/undefined for evidence captured before this field existed. */
+    overlappingElements?: DomElement[];
   };
   console: ConsoleEntry[];
   network: NetworkEntry[];
@@ -181,6 +205,83 @@ export interface BrowserEvidence {
   lighthouse?: Record<string, unknown>;
   axe?: Record<string, unknown>;
   collectedAt: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Automatic Responsive Testing (roadmap Phase 4)                          */
+/*                                                                          */
+/* Renders one URL at several standard breakpoints (default: 375/390/430/  */
+/* 768/1024/desktop) via the existing Playwright browser-worker, then       */
+/* evaluates the SAME existing rule engine + Issue/Health-Score model per   */
+/* breakpoint — never a parallel scoring system. Distinct from a normal     */
+/* scan: this is an on-demand, per-breakpoint check, not a persisted scan.  */
+/* ------------------------------------------------------------------------ */
+
+export const DEFAULT_RESPONSIVE_WIDTHS = [375, 390, 430, 768, 1024, 1280] as const;
+
+export interface ResponsiveTestRequest {
+  url: string;
+  /** Defaults to DEFAULT_RESPONSIVE_WIDTHS. Bounded server-side (see responsive-test-service.ts) — never an unbounded, client-controlled list of browser launches. */
+  widths?: number[];
+}
+
+export interface ResponsiveViewportResult {
+  width: number;
+  /** Human label for the width, e.g. "375px" or "1280px (Desktop)" — the last configured width is treated as "Desktop" for display, matching the roadmap's example UI. */
+  label: string;
+  issues: Issue[];
+  issueCount: number;
+  /** Base64 JPEG (no data: prefix) of the real rendered page at this width — the same browser-worker screenshot mechanism scanUrl already uses, never a fabricated placeholder image. */
+  screenshotBase64: string;
+}
+
+export type ResponsiveTestErrorCode = 'URL_INVALID' | 'BROWSER_WORKER_UNAVAILABLE' | 'RESPONSIVE_TEST_FAILED';
+
+export interface ResponsiveTestResult {
+  url: string;
+  viewports: ResponsiveViewportResult[];
+}
+
+/* ------------------------------------------------------------------------ */
+/* Visual Comparison (roadmap Phase 5)                                     */
+/*                                                                          */
+/* Compares two EXISTING scan screenshots (the existing ArtifactStore/      */
+/* artifact-serving infrastructure — never a new upload mechanism) for the  */
+/* SAME viewport, via real pixel-diffing (pixelmatch) — never a fabricated  */
+/* result. Before/after are referenced by (scanId, artifactKey), the exact  */
+/* pair GET /scans/:scanId/artifacts/:key already serves.                   */
+/* ------------------------------------------------------------------------ */
+
+export interface VisualComparisonRequest {
+  beforeScanId: string;
+  beforeArtifactKey: string;
+  afterScanId: string;
+  afterArtifactKey: string;
+}
+
+export type VisualComparisonErrorCode =
+  | 'SCAN_NOT_FOUND'
+  | 'ARTIFACT_NOT_FOUND'
+  | 'DIMENSION_MISMATCH'
+  | 'COMPARISON_FAILED';
+
+export interface ChangedRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface VisualComparisonResult {
+  /** Existing GET /scans/:scanId/artifacts/:key paths — the frontend renders these directly, never a second, duplicated image-serving path. */
+  beforeImageUrl: string;
+  afterImageUrl: string;
+  /** PNG, base64-encoded — highlights only the pixels that actually differ (pixelmatch's diffMask mode), not a rendered "before minus after" composite. */
+  diffImageBase64: string;
+  diffPercentage: number;
+  /** Coarse (grid-cell-resolution) bounding boxes around where real differing pixels cluster — real, derived from the actual diff, never invented. */
+  changedRegions: ChangedRegion[];
+  meaningfulChange: boolean;
 }
 
 export interface PageScanOptions {
@@ -352,6 +453,16 @@ export interface LensReportSummary {
   high: number;
   medium: number;
   low: number;
+  /**
+   * The roadmap's requested 3-tier client-facing labeling (Critical/
+   * Important/Improvements) — derived from the 4-tier fields above, never a
+   * second independently-computed count: important === high,
+   * improvements === medium + low. Both tiers are kept on the same summary
+   * object so existing 4-tier consumers (CSV/Markdown/developer view) are
+   * unaffected while the client-friendly view can use these instead.
+   */
+  important: number;
+  improvements: number;
 }
 
 /** Never CSV first (PDF is the primary human-facing report) — see ReportExportMenu.tsx's ordering. */
@@ -369,15 +480,27 @@ export interface LensReport {
   categories: Record<IssueCategory, number> | null;
   summary: LensReportSummary;
   issues: LensReportIssue[];
+  /** Existing GET /scans/:scanId/artifacts/:key paths (see ArtifactStore) — reused directly, never a second, duplicated screenshot store. Undefined per viewport when that viewport wasn't captured for this scan. */
+  screenshots?: { desktop?: string; mobile?: string };
+  /** Agency plan (V4) white-label branding — present only when the scan's owning organization currently has an Agency entitlement AND has configured branding. Absent entirely (not a default Origami Lens brand object) for every other report, so existing non-Agency reports are byte-for-byte unchanged. */
+  branding?: ReportBranding;
 }
 
 export interface ReportShareStatusResponse {
   active: boolean;
+  /** Agency plan (V4) client share links — undefined means "no expiration," identical to every pre-existing link. */
+  expiresAt?: string;
 }
 
 export interface CreateReportShareResponse {
   token: string;
   url: string;
+  expiresAt?: string;
+}
+
+/** Agency plan (V4) — optional expiration for a client share link; omitted (default) preserves the existing "valid until revoked" behavior exactly. */
+export interface CreateReportShareRequest {
+  expiresInDays?: number;
 }
 
 export type ReportErrorCode = 'REPORT_NOT_READY' | 'REPORT_SHARE_NOT_FOUND' | 'INVALID_EXPORT_FORMAT';
@@ -641,6 +764,50 @@ export interface ComponentEvidence {
   assets: ComponentAssetRef[];
   /** Set by the extension/content-script guard; re-verified server-side before any AI call. */
   containsSensitiveFields: boolean;
+}
+
+/* ------------------------------------------------------------------------ */
+/* "Select Anything" element actions — Explain/Fix/Improve/Make Responsive  */
+/*                                                                          */
+/* Distinct from CreateComponentJobRequest above (Convert to React/Tailwind/ */
+/* Recreate Component, which is the EXISTING generate_component pipeline,   */
+/* unchanged, just triggered from the same selected element): these four    */
+/* actions are single grounded Q&A-shaped calls, never a queued code-       */
+/* generation job. "explain"/"improve"/"make_responsive" are always         */
+/* browser-only (the selected element's own scrubbed evidence is the only   */
+/* grounding). "fix" additionally reuses the EXISTING repository search/     */
+/* rerank/Q&A pipeline (answerRepositoryQuestion, same as                   */
+/* POST /repositories/:id/ask) when a connected, ready repository is        */
+/* supplied — never a second, parallel source-grounding system.             */
+/* ------------------------------------------------------------------------ */
+
+export type ElementActionType = 'explain' | 'fix' | 'improve' | 'make_responsive';
+
+export interface ElementActionRequest {
+  action: ElementActionType;
+  evidence: ComponentEvidence;
+  /** Optional, bounded user guidance — same posture as RepositoryFixProposalRequest.instruction: it can narrow what to focus on, never override the action's own grounding rules. */
+  instruction?: string;
+  /** Only meaningful for "fix"/"improve"/"make_responsive" — when supplied and the repository is connected and ready, the action is grounded in real indexed source via the existing repository Q&A pipeline instead of browser-only evidence. */
+  repositoryId?: string;
+}
+
+export type ElementActionErrorCode =
+  | 'EVIDENCE_BLOCKED'
+  | 'REPOSITORY_NOT_FOUND'
+  | 'REPOSITORY_ACCESS_DENIED'
+  | 'REPOSITORY_NOT_READY'
+  | 'LLM_TIMEOUT'
+  | 'LLM_PROVIDER_UNAVAILABLE'
+  | 'LLM_INVALID_RESPONSE'
+  | 'ACTION_FAILED';
+
+export interface ElementActionResponse {
+  action: ElementActionType;
+  answer: string;
+  /** True only when the answer was actually grounded in indexed repository source (via answerRepositoryQuestion) — false means browser-only evidence was used, whether or not a repositoryId was supplied (e.g. the repository wasn't ready yet). Never mislabeled. */
+  groundedInRepository: boolean;
+  model?: string;
 }
 
 export interface GeneratedFile {
@@ -1261,6 +1428,43 @@ export interface RepositoryAskResponse {
 }
 
 /* ------------------------------------------------------------------------ */
+/* "Ask About This Page" — grounded Q&A over a STORED scan/page's evidence  */
+/*                                                                          */
+/* Distinct from AskRequest/'ask' above: that route is a stateless,         */
+/* live-evidence passthrough (the extension posts current-page evidence     */
+/* inline on every call). This is a persisted-scan analog of Phase 9's      */
+/* repository Q&A: the question is answered from evidence captured and      */
+/* privacy-scrubbed at scan time and stored on the scan/page_scans row      */
+/* (full_evidence_json), never by re-scraping the live page or accepting    */
+/* client-supplied evidence.                                                */
+/* ------------------------------------------------------------------------ */
+
+export interface PageAskRequest {
+  question: string;
+}
+
+export type PageAskErrorCode =
+  | 'SCAN_NOT_FOUND'
+  | 'PAGE_NOT_FOUND'
+  | 'SCAN_NOT_READY'
+  | 'EVIDENCE_UNAVAILABLE'
+  | 'ASK_QUESTION_INVALID'
+  | 'LLM_PROVIDER_UNAVAILABLE'
+  | 'LLM_TIMEOUT'
+  | 'ASK_FAILED';
+
+export interface PageAskResponse {
+  scanId: string;
+  pageScanId?: string;
+  url: string;
+  /** Grounded in — and only in — this page's own stored, scrubbed evidence. Explicitly says so when that evidence is insufficient, never a generic/invented answer. */
+  answer: string;
+  healthScore?: HealthScore;
+  issueCount: number;
+  model?: string;
+}
+
+/* ------------------------------------------------------------------------ */
 /* AI Issue Analysis + Code Fix Proposal for scan findings (Phase 10)       */
 /*                                                                          */
 /* Takes an EXISTING, persisted website-scan Issue (never a client-         */
@@ -1323,9 +1527,45 @@ export type RepositoryFixProposalErrorCode =
   /** The LLM was reachable and responded, but the response body was not valid/complete JSON (e.g. truncated mid-string by an output-token limit) — distinct from LLM_PROVIDER_UNAVAILABLE, which means the provider could not be reached at all. */
   | 'LLM_INVALID_RESPONSE'
   | 'PROPOSAL_INVALID'
+  /** A specific, more diagnosable PROPOSAL_INVALID: the proposal's oldText for a hunk does not appear in the indexed content for that file — see RepositoryFixGroundingDiagnostic for the (secret-free) detail attached to this rejection. */
+  | 'PROPOSAL_UNGROUNDED'
+  /** The indexed file/chunk content used to build this proposal's context and grounding check did not all agree on the same commit SHA — a data-consistency problem in the indexing pipeline itself, never silently ignored. See RepositoryFixRevisionMismatchDiagnostic. */
+  | 'SOURCE_REVISION_MISMATCH'
   | 'FIX_PROPOSAL_FAILED'
   /** This finding already has a different repository recorded against it (see Issue.repositoryId) — a fix was already generated once against that repository, and this request targets a different one. Never silently redirected. */
   | 'REPOSITORY_MISMATCH';
+
+/**
+ * Safe-to-display diagnostic for a PROPOSAL_UNGROUNDED rejection — never
+ * includes raw source content (only hashes), so it's safe to return over
+ * the wire and to log, in production or development alike. Lets a
+ * developer confirm exactly which file/hunk/commit failed grounding and
+ * compare content hashes without exposing repository source.
+ */
+export interface RepositoryFixGroundingDiagnostic {
+  filePath: string;
+  commitSha: string;
+  /** 0-based index into the rejected hunk's own file-change's hunks array. */
+  hunkIndex: number;
+  reportedStartLine: number;
+  reportedEndLine: number;
+  /** sha256 of the hunk's proposed oldText (line-ending-normalized, matching the comparison itself). */
+  oldTextHash: string;
+  /** sha256 of the full indexed content for this file (all of its chunks, concatenated in the same order/form the grounding check compared against). */
+  indexedContentHash: string;
+}
+
+/**
+ * Safe-to-display diagnostic for a SOURCE_REVISION_MISMATCH rejection.
+ */
+export interface RepositoryFixRevisionMismatchDiagnostic {
+  repositoryId: string;
+  /** The commit search/retrieval resolved and used to build this proposal's context. */
+  expectedCommitSha: string;
+  /** The (differing) commit actually recorded against the indexed file/chunk that disagreed. */
+  indexedCommitSha: string;
+  filePath?: string;
+}
 
 /**
  * The result of `resolveRepositoryForIssue` (see
@@ -1339,6 +1579,17 @@ export type RepositoryResolution =
   | { status: 'resolved'; repository: Repository }
   | { status: 'unresolved'; candidates: Repository[] }
   | { status: 'none' };
+
+/** How strongly the proposed change is tied to the DOM element the scan actually flagged — never a fabricated probability, always backed by concrete matched tokens (see repository-finding-evidence-scoring.ts). LOW/MEDIUM are surfaced honestly rather than hidden, since a proposal can be syntactically valid and still target the wrong file. */
+export type RepositoryFixConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface RepositoryFixSourceGrounding {
+  confidence: RepositoryFixConfidence;
+  /** The literal DOM-evidence tokens (class names, tag, id, data-testid, or visible-text words) found within the file(s) this fix changes. Empty when confidence is LOW. */
+  matchedEvidence: string[];
+  /** Explains why confidence is not HIGH. Unset when confidence is HIGH. */
+  note?: string;
+}
 
 export interface RepositoryFixProposalResponse {
   repositoryId: string;
@@ -1355,6 +1606,8 @@ export interface RepositoryFixProposalResponse {
   candidateCount: number;
   reranked: boolean;
   model?: string;
+  /** Unset when status is INSUFFICIENT_EVIDENCE (there is no selected file to grade). */
+  sourceGrounding?: RepositoryFixSourceGrounding;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1381,6 +1634,23 @@ export interface RepositoryFixApplyRequest {
 
 /** VALID/INVALID only apply to a Tree-sitter-parseable language; UNSUPPORTED (e.g. html) means no AST check was possible — never claimed as validated. */
 export type RepositoryFixSyntaxStatus = 'VALID' | 'INVALID' | 'UNSUPPORTED';
+
+/**
+ * WHY a proposed fix failed syntax validation (SYNTAX_VALIDATION_FAILED) —
+ * the real parser's own error-recovery location, never a fabricated
+ * compiler-style diagnostic. Present only when the failure was a real,
+ * reported parse error (i.e. the language was parseable at all).
+ */
+export interface RepositoryFixSyntaxErrorDetail {
+  filePath: string;
+  /** Human-readable label for which grammar/validator produced this (e.g. "TypeScript / TSX syntax"). */
+  validationType: string;
+  /** 1-based. */
+  line: number;
+  /** 1-based. */
+  column: number;
+  message: string;
+}
 
 export interface RepositoryFixChangedFile {
   filePath: string;
@@ -1504,6 +1774,17 @@ export type RepositoryFixWorkflowStatus =
 
 export type RepositoryFixPrProvider = 'GITHUB' | 'GITLAB' | 'BITBUCKET';
 
+/**
+ * How a GitHub PR was (or would be) created — orthogonal to `provider`
+ * (which host). GITHUB_APP_DIRECT is the original, unchanged flow (the
+ * Origami Lens GitHub App is installed on the repo). USER_DIRECT and
+ * USER_FORK exist so a developer with ordinary push access on a company
+ * repo where an admin never installed the App can still get a PR — see
+ * repository-github-provider-client.ts's resolvePrStrategy. GitLab/Bitbucket
+ * approvals never set this field (single-credential flow, no strategy fork).
+ */
+export type RepositoryFixPrStrategy = 'GITHUB_APP_DIRECT' | 'USER_DIRECT' | 'USER_FORK';
+
 export interface RepositoryFixApproveResponse {
   applicationId: string;
   repositoryId: string;
@@ -1516,6 +1797,22 @@ export interface RepositoryFixApproveResponse {
   provider: RepositoryFixPrProvider;
   prNumber?: number;
   prUrl?: string;
+  /** Only ever set for GITHUB — see RepositoryFixPrStrategy. */
+  prStrategy?: RepositoryFixPrStrategy;
+}
+
+/**
+ * Read-only preview of which PR strategy an approval WOULD use for this
+ * repository, resolved for the current authenticated user (never a global
+ * value) — lets the Fix-with-AI UI show "Uses: your GitHub access" / "Uses:
+ * fork + PR" / "Needs administrator approval" before the user commits to
+ * approving a fix. `ADMIN_APPROVAL_REQUIRED` here is a real possible
+ * strategy outcome, not an error — see the fuller error-code version of the
+ * same name in RepositoryFixWorkflowErrorCode for the approval-time failure.
+ */
+export interface RepositoryPrStrategyPreviewResponse {
+  strategy: RepositoryFixPrStrategy | 'ADMIN_APPROVAL_REQUIRED';
+  detail: string;
 }
 
 export type RepositoryFixWorkflowErrorCode =
@@ -1554,7 +1851,86 @@ export type RepositoryFixWorkflowErrorCode =
   | 'PR_ALREADY_EXISTS'
   | 'WORKFLOW_IN_PROGRESS'
   | 'FIX_APPLICATION_FAILED'
-  | 'FIX_WORKFLOW_FAILED';
+  | 'FIX_WORKFLOW_FAILED'
+  /** Neither the GitHub App nor the user's own GitHub access (direct push or a fork) can reach this repository — an organization/repository administrator must install the App or grant access. Returned BEFORE any branch/commit/push. */
+  | 'ADMIN_APPROVAL_REQUIRED'
+  /** A fork was created (or already existed) but GitHub had not finished provisioning it within the bounded poll window — safe to retry. */
+  | 'FORK_NOT_READY';
+
+/* ------------------------------------------------------------------------ */
+/* Create GitHub Issue (roadmap Phase 7)                                   */
+/*                                                                          */
+/* DISTINCT from "Fix with AI" -> Create Pull Request above: this creates a */
+/* plain GitHub issue from an Origami Lens finding — never a branch, commit, */
+/* or PR. Also distinct from CreateRepositoryIssueRequest (an unrelated,    */
+/* internal user-reported repository issue tracker, NOT GitHub Issues —    */
+/* see repository-issue-service.ts's own doc comment). Reuses the exact    */
+/* same per-repository GitHub auth resolution chain as PR creation         */
+/* (github-app-auth.ts/provider-connection-service.ts) — never assumes     */
+/* "the first" GitHub account, never bypasses GitHub's own permission      */
+/* model. Requires the GitHub App's permission manifest to include         */
+/* "Issues: Read and write" (see .env.example) — an existing installation  */
+/* granted only Contents/Pull requests will surface GITHUB_PERMISSION_     */
+/* DENIED until its owner re-approves the widened permission set in        */
+/* GitHub's own UI; that step is outside this application's code.         */
+/* ------------------------------------------------------------------------ */
+
+export interface CreateGitHubIssueRequest {
+  repositoryId: string;
+  /** Editable in the confirmation dialog before creation — defaults to a generated title/body/labels built from the finding (see repository-github-issue-service.ts), never silently created without review. */
+  title?: string;
+  body?: string;
+  labels?: string[];
+}
+
+export type GitHubIssueErrorCode =
+  | 'FINDING_NOT_FOUND'
+  | 'REPOSITORY_NOT_FOUND'
+  | 'REPOSITORY_ACCESS_DENIED'
+  | 'PROVIDER_UNSUPPORTED'
+  | 'GITHUB_AUTH_NOT_CONFIGURED'
+  | 'GITHUB_PERMISSION_DENIED'
+  | 'GITHUB_REQUEST_FAILED';
+
+export interface CreateGitHubIssueResponse {
+  issueNumber: number;
+  issueUrl: string;
+  /** True when this call returned an issue that was already linked (same finding + repository) instead of creating a new one — lets the frontend show "Already Exists" rather than "Created" without a second request. */
+  alreadyExisted?: boolean;
+}
+
+/** Server-generated preview shown in the confirmation dialog before the user commits to creating anything — the same title/body/labels create-github-issue would actually use, just not yet sent to GitHub. */
+export interface GitHubIssuePreview {
+  title: string;
+  body: string;
+  labels: string[];
+  owner: string;
+  repo: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Origami Lead Generation — "Talk to Origami" (roadmap Phase 8)           */
+/*                                                                          */
+/* A non-aggressive CTA shown after meaningful issues are found. The lead   */
+/* is always associated with the scan it was submitted from server-side    */
+/* (never a client-supplied workspace/organization id) — see               */
+/* lead-service.ts and migration 037.                                      */
+/* ------------------------------------------------------------------------ */
+
+export interface CreateLeadRequest {
+  name: string;
+  email: string;
+  company?: string;
+  message?: string;
+  /** The scan/report this request was submitted from — automatic context, never something the user has to re-type (domain/Health Score/issue counts are derived from it server-side). */
+  scanId?: string;
+}
+
+export type LeadErrorCode = 'NAME_REQUIRED' | 'EMAIL_INVALID' | 'SCAN_NOT_FOUND';
+
+export interface CreateLeadResponse {
+  id: string;
+}
 
 /* ------------------------------------------------------------------------ */
 /* Phase 16/A — Real application user identity + sessions (migration 011).  */
@@ -1710,8 +2086,72 @@ export interface Organization {
   name: string;
   /** Set only for a user's own personal organization (one per user, guaranteed unique). Undefined for a real team/agency organization. */
   personalOwnerUserId?: string;
+  /**
+   * Agency plan (V4) — set only for a CLIENT workspace an agency created
+   * (see OrganizationRepository.createClientWorkspace). This is a listing/
+   * management relationship only, not an access grant: an agency member
+   * still needs their own organization_memberships row in the client
+   * workspace itself to access its data (see migration 042's doc comment).
+   */
+  parentOrganizationId?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CreateClientWorkspaceRequest {
+  name: string;
+}
+
+export type ClientWorkspaceErrorCode = 'FORBIDDEN' | 'NOT_AN_AGENCY_PLAN' | 'INVALID_NAME' | 'CLIENT_WORKSPACE_NOT_FOUND';
+
+/** One row in the Agency's "Client workspaces" list — just enough to render the list without a second round trip per client. */
+export interface ClientWorkspaceSummary {
+  organizationId: string;
+  name: string;
+  memberCount: number;
+  createdAt: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Agency plan (V4) — white-label branding. One row per organization;       */
+/* actually APPLIED to a report only when that organization currently has   */
+/* an Agency entitlement (see EntitlementService.canUseWhiteLabelBranding), */
+/* even if a row exists here from a since-downgraded account.               */
+/* ------------------------------------------------------------------------ */
+
+export interface AgencyBranding {
+  organizationId: string;
+  displayName?: string;
+  /** Served from GET /agency/branding/:organizationId/logo — never a raw storage key or base64 blob in this type. */
+  logoUrl?: string;
+  /** Hex color, e.g. "#6d5ef6" — validated server-side. */
+  primaryColor?: string;
+  accentColor?: string;
+  websiteUrl?: string;
+  contactEmail?: string;
+  updatedAt: string;
+}
+
+export interface UpdateAgencyBrandingRequest {
+  displayName?: string;
+  primaryColor?: string;
+  accentColor?: string;
+  websiteUrl?: string;
+  contactEmail?: string;
+}
+
+export type AgencyBrandingErrorCode =
+  | 'FORBIDDEN'
+  | 'NOT_AN_AGENCY_PLAN'
+  | 'INVALID_COLOR'
+  | 'INVALID_LOGO_TYPE'
+  | 'LOGO_TOO_LARGE';
+
+/** What a report/share page actually renders — a tiny, display-only slice of AgencyBranding, never the full settings object (no contactEmail, for instance). Absent entirely for a non-Agency or unbranded report. */
+export interface ReportBranding {
+  displayName?: string;
+  logoUrl?: string;
+  primaryColor?: string;
 }
 
 export interface OrganizationMembership {
@@ -1759,7 +2199,8 @@ export type WorkspaceErrorCode =
   | 'MEMBER_NOT_FOUND'
   | 'MEMBER_ALREADY_EXISTS'
   | 'CANNOT_REMOVE_LAST_OWNER'
-  | 'MULTI_MEMBER_NOT_SUPPORTED_ON_PLAN';
+  | 'MULTI_MEMBER_NOT_SUPPORTED_ON_PLAN'
+  | 'SEAT_LIMIT_REACHED';
 
 /* ------------------------------------------------------------------------ */
 /* Phase 20 — workspace email invitations (migration 030). Membership is    */
@@ -1822,7 +2263,8 @@ export type WorkspaceInvitationErrorCode =
   | 'INVITATION_EXPIRED'
   | 'INVITATION_REVOKED'
   | 'INVITATION_ALREADY_ACCEPTED'
-  | 'EMAIL_MISMATCH';
+  | 'EMAIL_MISMATCH'
+  | 'SEAT_LIMIT_REACHED';
 
 /** GET /workspace/list-mine — every organization the caller belongs to, for the workspace switcher (only rendered when this has more than one entry). */
 export interface WorkspaceListItem {
@@ -1972,6 +2414,16 @@ export interface ProviderConnectionSummary {
   externalAccountLogin: string;
   status: 'ACTIVE' | 'REVOKED';
   createdAt: string;
+  /**
+   * Only meaningful for GITHUB, which has TWO distinct connection kinds
+   * (GitLab/Bitbucket have only one, so this is always APP_INSTALLATION-
+   * equivalent — i.e. omitted — for them): APP_INSTALLATION is the GitHub
+   * App (installable only by an org/repo admin, one row per installation —
+   * a user can hold several); DIRECT_PUSH is a user's own `repo`-scoped
+   * OAuth connection (any user with GitHub credentials can connect one for
+   * THEIR OWN access, no admin involved — see resolvePrStrategy).
+   */
+  connectionKind?: 'APP_INSTALLATION' | 'DIRECT_PUSH';
 }
 
 export interface ListProviderConnectionsResponse {
@@ -2004,6 +2456,31 @@ export interface PlanLimits {
   inspectionsPerDay: number | null;
   aiQuestionsPerDay: number | null;
   screenshotToCodePerDay: number | null;
+  /**
+   * Continuous Monitoring (V3) capacity, not a per-day consumed quota like
+   * the fields above — a persistent cap on how many enabled monitored
+   * sites an organization may have at once (see
+   * EntitlementService.assertMonitoredSiteCapacity). `0` means the
+   * capability isn't included on this plan; `null` means unlimited.
+   * PLACEHOLDER VALUES: product has not yet defined per-tier commercial
+   * limits for this feature (V3 spec explicitly says not to invent them),
+   * so every paid plan is temporarily unlimited and only FREE is excluded
+   * — tier these properly here once pricing is decided, the same way
+   * every other PlanLimits field already is.
+   */
+  monitoredWebsitesIncluded: number | null;
+  /**
+   * Agency plan (V4) — a HARD cap on internal (non-CLIENT_VIEWER) workspace
+   * members, enforced at invite/add-member time (see
+   * EntitlementService.checkSeatCapacity), not just billed economically
+   * like includedSeats/extraSeatPriceMonthlyUsd are for Team. `null` for
+   * every existing plan preserves their exact current (unenforced)
+   * behavior — only Agency sets this, to 15, matching the product
+   * requirement of "approximately 15 internal users." A CLIENT_VIEWER
+   * membership never counts against this cap (see
+   * OrganizationRepository.countInternalMembers).
+   */
+  internalSeatHardCap: number | null;
 }
 
 export interface PlanDefinition {
@@ -2028,7 +2505,7 @@ export const PLAN_DEFINITIONS: Record<SubscriptionPlan, PlanDefinition> = {
     tagline: 'Try Origami Lens on your own site',
     priceMonthlyUsd: 0,
     priceAnnualUsd: 0,
-    limits: { inspectionsPerDay: 5, aiQuestionsPerDay: 5, screenshotToCodePerDay: 2 },
+    limits: { inspectionsPerDay: 5, aiQuestionsPerDay: 5, screenshotToCodePerDay: 2, monitoredWebsitesIncluded: 0, internalSeatHardCap: null },
     includedSeats: 1,
     extraSeatPriceMonthlyUsd: null,
     features: ['5 inspections/day', '5 AI questions/day', '2 Screenshot→Code/day', 'Community support'],
@@ -2040,7 +2517,7 @@ export const PLAN_DEFINITIONS: Record<SubscriptionPlan, PlanDefinition> = {
     tagline: 'For individual developers shipping fast',
     priceMonthlyUsd: 19,
     priceAnnualUsd: 190,
-    limits: { inspectionsPerDay: 50, aiQuestionsPerDay: 50, screenshotToCodePerDay: 20 },
+    limits: { inspectionsPerDay: 50, aiQuestionsPerDay: 50, screenshotToCodePerDay: 20, monitoredWebsitesIncluded: null, internalSeatHardCap: null },
     includedSeats: 1,
     extraSeatPriceMonthlyUsd: null,
     features: ['50 inspections/day', '50 AI questions/day', '20 Screenshot→Code/day', 'Email support'],
@@ -2052,7 +2529,7 @@ export const PLAN_DEFINITIONS: Record<SubscriptionPlan, PlanDefinition> = {
     tagline: 'For professionals who ship every day',
     priceMonthlyUsd: 49,
     priceAnnualUsd: 490,
-    limits: { inspectionsPerDay: 200, aiQuestionsPerDay: 200, screenshotToCodePerDay: 100 },
+    limits: { inspectionsPerDay: 200, aiQuestionsPerDay: 200, screenshotToCodePerDay: 100, monitoredWebsitesIncluded: null, internalSeatHardCap: null },
     includedSeats: 1,
     extraSeatPriceMonthlyUsd: null,
     features: ['200 inspections/day', '200 AI questions/day', '100 Screenshot→Code/day', 'Priority support'],
@@ -2064,7 +2541,7 @@ export const PLAN_DEFINITIONS: Record<SubscriptionPlan, PlanDefinition> = {
     tagline: 'For teams collaborating on quality',
     priceMonthlyUsd: 99,
     priceAnnualUsd: 990,
-    limits: { inspectionsPerDay: null, aiQuestionsPerDay: null, screenshotToCodePerDay: null },
+    limits: { inspectionsPerDay: null, aiQuestionsPerDay: null, screenshotToCodePerDay: null, monitoredWebsitesIncluded: null, internalSeatHardCap: null },
     includedSeats: 3,
     extraSeatPriceMonthlyUsd: 4,
     features: [
@@ -2079,14 +2556,18 @@ export const PLAN_DEFINITIONS: Record<SubscriptionPlan, PlanDefinition> = {
   AGENCY: {
     id: 'AGENCY',
     name: 'Agency',
-    tagline: 'For agencies managing many client sites (coming soon)',
-    priceMonthlyUsd: 249,
-    priceAnnualUsd: 2490,
-    limits: { inspectionsPerDay: null, aiQuestionsPerDay: null, screenshotToCodePerDay: null },
-    includedSeats: 10,
-    extraSeatPriceMonthlyUsd: 4,
-    features: ['Everything in Team', 'Multi-client workspace management', 'White-label reports', 'Dedicated support'],
-    active: false,
+    tagline: 'For agencies managing many client sites',
+    priceMonthlyUsd: 49,
+    priceAnnualUsd: 490,
+    limits: { inspectionsPerDay: null, aiQuestionsPerDay: null, screenshotToCodePerDay: null, monitoredWebsitesIncluded: null, internalSeatHardCap: 15 },
+    includedSeats: 15,
+    // The product requirements document specifies ~15 internal users and does
+    // NOT specify an extra-seat price for Agency (unlike Team's documented
+    // $4/seat) — never invented. Agency seats are a hard cap
+    // (limits.internalSeatHardCap), not a purchasable add-on today.
+    extraSeatPriceMonthlyUsd: null,
+    features: ['Everything in Pro', 'Up to 15 internal team members', 'Multi-client workspace management', 'White-label reports', 'Custom branding', 'Dedicated support'],
+    active: true,
   },
 };
 
@@ -2155,3 +2636,259 @@ export type BillingErrorCode =
   | 'SEAT_COUNT_INVALID'
   | 'CHECKOUT_SESSION_NOT_FOUND'
   | 'ORGANIZATION_NOT_FOUND';
+
+/* ------------------------------------------------------------------------ */
+/* Create Bug Report                                                        */
+/*                                                                          */
+/* A self-contained incident record, captured from the extension on the     */
+/* REAL page the user is viewing (never a dashboard/scan URL) — distinct    */
+/* from a scan Issue: it can exist with no scan/repository at all, or be    */
+/* linked to one (linkedIssueId/linkedScanId) to reuse that issue's already-*/
+/* generated problem/cause/suggestedFix rather than regenerating them.      */
+/* ConsoleEntry/NetworkEntry (defined above for BrowserEvidence) are reused  */
+/* verbatim — same shape, a different, live-browser-sourced collector.      */
+/* ------------------------------------------------------------------------ */
+
+export interface BugReportDomEvidence {
+  selector: string;
+  tag: string;
+  text?: string;
+  /** Bounded (see MAX_HTML_CHARS in selection-overlay.ts) — never the whole page. */
+  html: string;
+  attributes: Record<string, string>;
+  computedStyles: Record<string, string>;
+  boundingBox: { x: number; y: number; width: number; height: number };
+  accessibleName?: string;
+}
+
+export interface CreateBugReportRequest {
+  title: string;
+  url: string;
+  pageTitle?: string;
+  /** Parsed from navigator.userAgent at the moment of capture — e.g. "Chrome 129" — never invented when parsing fails (falls back to a generic "unknown" label, never a guessed version). */
+  browser: string;
+  /** Parsed from navigator.userAgent/platform — e.g. "Windows", "macOS", "Linux" — a family name only; the browser does not reliably expose an exact OS version, so none is invented (see the audit's OS section). */
+  operatingSystem: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  devicePixelRatio: number;
+  /** Base64 JPEG, no data: prefix — a full-tab screenshot, or a cropped element+context screenshot when domEvidence is present (the SAME chrome.tabs.captureVisibleTab mechanism Select Anything already uses). */
+  screenshotBase64?: string;
+  /** Only console.error/uncaught exceptions/unhandled rejections captured WHILE the tab's content script was loaded — never console.log, never retroactive (nothing before the content script attached is, or could be, captured). */
+  consoleErrors: ConsoleEntry[];
+  /** Only failed (status >= 400, or a network-level failure) requests observed the same way. */
+  networkErrors: NetworkEntry[];
+  /** Present only when the user selected a specific element via Select Anything before reporting. */
+  domEvidence?: BugReportDomEvidence;
+  description: string;
+  severity: Severity;
+  category: IssueCategory;
+  /** User-authored, one step per line — the system has no interaction-history/click-tracking to draw from, so these are never auto-generated (see the audit's Reproduction Context section). May be empty. */
+  reproductionSteps: string[];
+  expectedBehavior?: string;
+  actualBehavior?: string;
+  /** Set when reported from an Issue Detail page rather than live from the extension — the linked issue's own problem/cause/suggestedFix are reused, never regenerated. */
+  linkedIssueId?: string;
+  linkedScanId?: string;
+}
+
+export interface BugReport {
+  id: string;
+  title: string;
+  url: string;
+  pageTitle?: string;
+  browser: string;
+  operatingSystem: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  devicePixelRatio: number;
+  hasScreenshot: boolean;
+  consoleErrors: ConsoleEntry[];
+  networkErrors: NetworkEntry[];
+  domEvidence?: BugReportDomEvidence;
+  description: string;
+  severity: Severity;
+  category: IssueCategory;
+  reproductionSteps: string[];
+  expectedBehavior?: string;
+  actualBehavior?: string;
+  /** Copied from the linked issue at creation time, never AI-regenerated — see CreateBugReportRequest.linkedIssueId's doc comment. Unset for a standalone report with no linked issue. */
+  suggestedFix?: string;
+  linkedIssueId?: string;
+  linkedScanId?: string;
+  createdAt: string;
+  /**
+   * Set once, permanently, the first time Create GitHub Issue succeeds for
+   * this bug report (migration 039) — a later call to the same route
+   * returns this EXISTING link instead of creating a second, duplicate
+   * GitHub issue. Absent until then.
+   */
+  githubRepositoryId?: string;
+  githubIssueNumber?: number;
+  githubIssueUrl?: string;
+}
+
+export type BugReportErrorCode = 'BUG_REPORT_NOT_FOUND' | 'BUG_REPORT_INVALID' | 'BUG_REPORT_ACCESS_DENIED';
+
+export interface CreateBugReportResponse {
+  id: string;
+  url: string;
+}
+
+/** DISTINCT from CreateGitHubIssueRequest (a scan finding) — this builds the GitHub issue body from a BugReport's own fields (reusing the same resolveRepositoryProvider/credential chain, never a second GitHub integration). */
+export interface CreateBugReportGitHubIssueRequest {
+  repositoryId: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Continuous Website Monitoring (V3) — a workspace-owned, scheduled re-scan */
+/* of a saved website, reusing the existing scan pipeline/HealthScore/issue */
+/* model as its sole source of scan data (migration 041). Deliberately does */
+/* NOT introduce a second scanning engine: a monitored site's scans are     */
+/* ordinary rows in the existing `scans`/`issues` tables, just tagged with  */
+/* `monitoredSiteId` and compared against each other by a deterministic     */
+/* regression engine (apps/api/src/monitoring/*). AI only EXPLAINS an       */
+/* already-detected regression — it never decides whether one occurred.    */
+/* ------------------------------------------------------------------------ */
+
+/** Only DAILY exists in V3 — the enum is extended later (ALTER TYPE, same convention OrganizationRole's own evolution used) rather than redesigned when a second frequency is added. */
+export type MonitoringFrequency = 'DAILY';
+
+/**
+ * PENDING: created, first (baseline) scan hasn't completed yet.
+ * HEALTHY: most recent completed scan has no still-open regression event.
+ * REGRESSION: most recent completed scan produced at least one open regression event.
+ * FAILED: the most recent scan ATTEMPT itself failed (distinct from a completed scan that shows a regression).
+ * Pausing is tracked separately via `enabled`, not a status value, so a paused site keeps its last real health status visible underneath a "Paused" badge.
+ */
+export type MonitoringSiteStatus = 'PENDING' | 'HEALTHY' | 'REGRESSION' | 'FAILED';
+
+export interface MonitoredSite {
+  id: string;
+  organizationId: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  frequency: MonitoringFrequency;
+  status: MonitoringSiteStatus;
+  /** The first scan ever run for this site — frozen once set (see monitored-site-service.ts). Distinct from "the previous scan," which is whichever completed scan most recently preceded a given one, used for day-over-day regression comparison. */
+  baselineScanId?: string;
+  lastScanId?: string;
+  lastScanAt?: string;
+  /** Set only when the most recent scan ATTEMPT failed outright (e.g. all pages failed to load) — cleared on the next successful scan. */
+  lastScanError?: string;
+  nextScanAt: string;
+  createdByUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateMonitoredSiteRequest {
+  name: string;
+  url: string;
+  frequency?: MonitoringFrequency;
+  enabled?: boolean;
+}
+
+export interface UpdateMonitoredSiteRequest {
+  name?: string;
+  frequency?: MonitoringFrequency;
+}
+
+export type MonitoredSiteErrorCode =
+  | 'MONITORED_SITE_NOT_FOUND'
+  | 'MONITORED_SITE_INVALID'
+  | 'MONITORED_SITE_URL_UNSAFE'
+  | 'MONITORED_SITE_LIMIT_REACHED'
+  | 'MONITORED_SITE_SCAN_IN_PROGRESS';
+
+/** One row per monitored site in the dashboard's summary list/table — adds just enough live scan data (current + previous score) to the stored config to render "67 ↓ 24" without a second round trip per site. */
+export interface MonitoredSiteSummary extends MonitoredSite {
+  currentHealthScore?: number;
+  previousHealthScore?: number;
+  openRegressionCount: number;
+}
+
+export interface MonitoredSitesSummaryStats {
+  total: number;
+  healthy: number;
+  regressions: number;
+  failed: number;
+  paused: number;
+}
+
+export interface ListMonitoredSitesResponse {
+  sites: MonitoredSiteSummary[];
+  stats: MonitoredSitesSummaryStats;
+}
+
+/** One point in a monitored site's scan-history trend line/table. */
+export interface MonitoredSiteScanHistoryEntry {
+  scanId: string;
+  scannedAt: string;
+  status: ScanStatus;
+  healthScore?: number;
+  hasOpenRegression: boolean;
+}
+
+export interface MonitoredSiteDetail {
+  site: MonitoredSite;
+  currentHealthScore?: number;
+  previousHealthScore?: number;
+  baselineHealthScore?: number;
+  scanHistory: MonitoredSiteScanHistoryEntry[];
+  events: MonitoringEvent[];
+}
+
+/**
+ * RESPONSIVE_REGRESSION and VISUAL_REGRESSION are reserved/defined now so
+ * the event model never needs a breaking change later, but VISUAL_REGRESSION
+ * is the only one actually emitted in V3 (via the existing
+ * compareScanScreenshots pixel-diff service, root-page screenshot only).
+ * RESPONSIVE_REGRESSION is NOT emitted — responsive testing is on-demand
+ * only today (see ResponsiveTestRequest's own doc comment) and isn't
+ * persisted as part of a scan, so there's nothing stored to compare
+ * day-over-day; this is the documented extension point for that later.
+ */
+export type MonitoringEventType =
+  | 'HEALTH_SCORE_DROP'
+  | 'NEW_JAVASCRIPT_ERROR'
+  | 'NEW_NETWORK_ERROR'
+  | 'ACCESSIBILITY_REGRESSION'
+  | 'PERFORMANCE_REGRESSION'
+  | 'RESPONSIVE_REGRESSION'
+  | 'VISUAL_REGRESSION';
+
+export interface MonitoringEvent {
+  id: string;
+  monitoredSiteId: string;
+  scanId?: string;
+  previousScanId?: string;
+  eventType: MonitoringEventType;
+  severity: Severity;
+  title: string;
+  description: string;
+  previousValue?: unknown;
+  currentValue?: unknown;
+  metadata: Record<string, unknown>;
+  /** Deployment-correlation extension point (future-ready) — never populated/read by any V3 logic itself. */
+  deploymentId?: string;
+  commitSha?: string;
+  repositoryId?: string;
+  createdAt: string;
+}
+
+export interface RunMonitoredSiteScanResponse {
+  scanId: string;
+}
+
+export type MonitoringAskErrorCode = MonitoredSiteErrorCode | 'NO_SCAN_DATA' | 'LLM_TIMEOUT' | 'LLM_PROVIDER_UNAVAILABLE' | 'LLM_INVALID_RESPONSE' | 'ASK_FAILED';
+
+export interface MonitoringAskRequest {
+  /** Defaults to "Why did my website score drop?" server-side when omitted — see monitoring-regression-service.ts. */
+  question?: string;
+}
+
+export interface MonitoringAskResponse {
+  answer: string;
+}

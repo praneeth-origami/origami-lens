@@ -5,6 +5,11 @@ import { ScanRepository } from '../db/scan-repository.js';
 import { PageScanRunner } from '../page-scan-runner.js';
 import { WebsiteScanOrchestrator } from '../website-scan-orchestrator.js';
 import type { WebsiteScanOptions } from '@origami/contracts';
+import { ArtifactStore } from '../artifact-store.js';
+import { MonitoredSiteRepository } from '../db/monitored-site-repository.js';
+import { MonitoringEventRepository } from '../db/monitoring-event-repository.js';
+import { processMonitoringScanCompletion } from '../monitoring/monitoring-scan-completion.js';
+import { sendMonitoringRegressionNotification } from '../monitoring/monitoring-notification-service.js';
 
 const QUEUE_NAME = 'website-scan-jobs';
 
@@ -13,6 +18,8 @@ export interface WebsiteScanJobPayload {
   rootUrl: string;
   options: WebsiteScanOptions;
   ownerId?: string;
+  /** Set only when this job was enqueued BY continuous monitoring (scheduled or manual "Run Now") — see monitored-site-service.ts. Triggers the post-completion regression-comparison hook below; absent for an ordinary one-off website scan. */
+  monitoredSiteId?: string;
 }
 
 let queue: Queue<WebsiteScanJobPayload> | null = null;
@@ -55,12 +62,27 @@ export function startWebsiteScanWorker(): Worker<WebsiteScanJobPayload> | null {
   const repo = new ScanRepository();
   const pageRunner = new PageScanRunner();
   const orchestrator = new WebsiteScanOrchestrator(repo, pageRunner);
+  const artifactStore = new ArtifactStore();
+  const monitoredSiteRepo = new MonitoredSiteRepository();
+  const monitoringEventRepo = new MonitoringEventRepository();
 
   const worker = new Worker<WebsiteScanJobPayload>(
     QUEUE_NAME,
     async (job: Job<WebsiteScanJobPayload>) => {
-      const { scanId, rootUrl, options, ownerId } = job.data;
+      const { scanId, rootUrl, options, ownerId, monitoredSiteId } = job.data;
       await orchestrator.runWebsiteScan(scanId, rootUrl, options, ownerId);
+
+      if (monitoredSiteId) {
+        await processMonitoringScanCompletion(monitoredSiteId, scanId, {
+          scanRepo: repo,
+          monitoredSiteRepo,
+          eventRepo: monitoringEventRepo,
+          artifactStore,
+          notifyRegression: sendMonitoringRegressionNotification,
+        }).catch((error) => {
+          console.error(`[monitoring] post-scan processing failed for site ${monitoredSiteId}:`, error instanceof Error ? error.message : error);
+        });
+      }
     },
     { connection, concurrency: 1 },
   );
@@ -73,6 +95,9 @@ export function startWebsiteScanWorker(): Worker<WebsiteScanJobPayload> | null {
         scannedAt: new Date().toISOString(),
         error: err.message,
       });
+      if (job.data.monitoredSiteId) {
+        void monitoredSiteRepo.recordScanFailure(job.data.monitoredSiteId, job.data.scanId, err.message);
+      }
     }
   });
 

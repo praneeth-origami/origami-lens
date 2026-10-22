@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
-import type { AggregatedIssue, Issue, IssueStatus } from '@origami/contracts';
+import type { AggregatedIssue, GitHubIssueLink, Issue, IssueStatus, Repository } from '@origami/contracts';
 import { CATEGORY_LABEL, SEVERITY_LABEL, SOURCE_LABEL, STATUS_LABEL } from '../api/client';
+import { CreateGitHubIssueButton } from './CreateGitHubIssueButton';
 
 interface Props {
   issue: Issue | AggregatedIssue;
@@ -11,6 +12,13 @@ interface Props {
   onExport: () => void;
   onStatusChange: (status: IssueStatus) => void;
   actionMessage: string;
+  /** Threaded straight through to CreateGitHubIssueButton, now rendered here instead of at the bottom of the page — see that component's doc comment. Shared with IssueFixWithAi's own repository picker, never a second/duplicated one. */
+  repositories: Repository[];
+  selectedRepoId: string;
+  setSelectedRepoId: (id: string) => void;
+  reloadRepositories: () => void;
+  /** Bugfix (duplicate GitHub issues): called with the persisted link right after a successful create, so IssueDetailPage can patch its loaded issue's own githubIssueLinks without a full refetch. */
+  onGitHubIssueLinked: (link: GitHubIssueLink) => void;
 }
 
 /** Same single-purpose relative-time helper duplicated in ScanSummary.tsx — this codebase's existing convention rather than sharing a util for one small display line. */
@@ -31,7 +39,7 @@ export function affectedCount(issue: Issue | AggregatedIssue): number {
   return 1;
 }
 
-export function IssueHeader({ issue, scanId, scanUrl, scannedAt, onShare, onExport, onStatusChange, actionMessage }: Props) {
+export function IssueHeader({ issue, scanId, scanUrl, scannedAt, onShare, onExport, onStatusChange, actionMessage, repositories, selectedRepoId, setSelectedRepoId, reloadRepositories, onGitHubIssueLinked }: Props) {
   const severityClass = issue.severity.toLowerCase();
   const status = issue.status ?? 'open';
   const description = (issue.evidence.message && String(issue.evidence.message)) || issue.problem;
@@ -46,6 +54,15 @@ export function IssueHeader({ issue, scanId, scanUrl, scannedAt, onShare, onExpo
         <div className="issue-detail-actions">
           <button type="button" className="ghost-button" onClick={onShare}>Share</button>
           <button type="button" className="ghost-button" onClick={onExport}>Export</button>
+          <CreateGitHubIssueButton
+            issueId={issue.id}
+            githubIssueLinks={issue.githubIssueLinks}
+            repositories={repositories}
+            selectedRepoId={selectedRepoId}
+            setSelectedRepoId={setSelectedRepoId}
+            reloadRepositories={reloadRepositories}
+            onLinked={onGitHubIssueLinked}
+          />
           {status === 'resolved' ? (
             <button type="button" className="primary-button" onClick={() => onStatusChange('open')}>Reopen Issue</button>
           ) : (

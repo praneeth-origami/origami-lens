@@ -8,6 +8,7 @@ import type {
   RepositoryFixChangedFile,
   RepositoryFixLineGrounding,
   RepositoryFixProposalResponse,
+  RepositoryFixSyntaxErrorDetail,
 } from '@origami/contracts';
 import { canAccessRepository } from './repository-service.js';
 import { isRepositoryPathSafe, normalizeRepositoryPath } from './repository-path-safety.js';
@@ -15,7 +16,8 @@ import { isSensitiveFile } from './repository-file-safety.js';
 import { REPOSITORY_CLONE_ROOT, isPathInside, resolveCloneDir } from './repository-clone-service.js';
 import { getWorkingTreeDiff } from './repository-git.js';
 import { createFixWorkspace, discardFixWorkspace, FixWorkspaceCreationError, StaleRepositoryError } from './repository-fix-worktree.js';
-import { applyHunkToContent, validateSyntax } from './repository-fix-validation.js';
+import { applyHunkToContent, validateSyntaxDetailed } from './repository-fix-validation.js';
+import { syntaxValidationTypeLabel } from './repository-language.js';
 import type { UnifiedRepositoryIndexStore } from './unified-repository-index-store.js';
 import type { InsertIndexFileInput } from './db/repository-index-repository.js';
 
@@ -23,7 +25,7 @@ import type { InsertIndexFileInput } from './db/repository-index-repository.js';
 const NOT_YET_INDEXED_STATUSES = new Set(['CONNECTED', 'DISCONNECTED', 'CLONING', 'READY_FOR_INDEXING', 'INDEXING', 'FAILED']);
 
 export class FixApplicationError extends Error {
-  constructor(message: string, public readonly code: RepositoryFixApplyErrorCode) {
+  constructor(message: string, public readonly code: RepositoryFixApplyErrorCode, public readonly syntaxError?: RepositoryFixSyntaxErrorDetail) {
     super(message);
     this.name = 'FixApplicationError';
   }
@@ -252,10 +254,21 @@ export async function applyFindingFix(
     for (const change of normalizedChanges) {
       const absolutePath = path.join(workspace.workspaceDir, change.filePath);
       const content = fs.readFileSync(absolutePath, 'utf-8');
-      const status = await validateSyntax(change.indexedFile.language, content);
+      const { status, errorDetail } = await validateSyntaxDetailed(change.indexedFile.language, content);
       syntaxByPath.set(change.filePath, status);
       if (status === 'INVALID') {
-        throw new FixApplicationError(`Path "${change.filePath}" is not syntactically valid after applying the proposed change.`, 'SYNTAX_VALIDATION_FAILED');
+        const validationType = syntaxValidationTypeLabel(change.indexedFile.language);
+        const syntaxError: RepositoryFixSyntaxErrorDetail | undefined = errorDetail && {
+          filePath: change.filePath,
+          validationType,
+          line: errorDetail.line,
+          column: errorDetail.column,
+          message: errorDetail.message,
+        };
+        const message = syntaxError
+          ? `Path "${change.filePath}" is not syntactically valid after applying the proposed change (${validationType}, line ${syntaxError.line}, column ${syntaxError.column}): ${syntaxError.message}`
+          : `Path "${change.filePath}" is not syntactically valid after applying the proposed change.`;
+        throw new FixApplicationError(message, 'SYNTAX_VALIDATION_FAILED', syntaxError);
       }
       if (status === 'VALID') sawSupported = true;
     }

@@ -18,6 +18,21 @@ function mockFetch(handler: (url: string, init: RequestInit) => { status: number
   }) as typeof fetch;
 }
 
+/** Routes by URL substring + method, in order — the first matching entry handles the call. Used for resolvePrStrategy tests, which make several distinct GitHub API calls in sequence (repo permissions, fork creation, fork readiness poll). */
+function mockFetchByUrl(routes: Array<{ test: RegExp; method?: string; respond: (url: string, init: RequestInit) => { status: number; body: unknown } }>) {
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    const route = routes.find((r) => r.test.test(url) && (!r.method || (init.method ?? 'GET') === r.method));
+    if (!route) throw new Error(`No mock route for ${init.method ?? 'GET'} ${url}`);
+    const { status, body } = route.respond(url, init);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: `status-${status}`,
+      json: async () => body,
+    } as unknown as Response;
+  }) as typeof fetch;
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   process.env.GITHUB_TOKEN = originalToken;
@@ -179,5 +194,189 @@ describe('GitHubProviderClient — createPullRequest', () => {
     assert.equal(pr.number, 7);
     assert.equal(pr.alreadyExisted, true);
     assert.equal(call, 2);
+  });
+
+  it('a fork PR (headOwner set, different from owner) formats head as "headOwner:branch" and calls createPullRequest against the BASE repo, never the fork', async () => {
+    mockFetch((url, init) => {
+      assert.match(url, /\/repos\/acme-corp\/widgets\/pulls$/, 'must POST to the base repo, not the fork');
+      const body = JSON.parse(init.body as string);
+      assert.equal(body.head, 'my-fork-user:ai-fix/test');
+      assert.equal(body.base, 'main');
+      return { status: 201, body: { number: 9, html_url: 'https://github.com/acme-corp/widgets/pull/9' } };
+    });
+    const client = new GitHubProviderClient();
+    const pr = await client.createPullRequest('user-1', {
+      owner: 'acme-corp', repo: 'widgets', title: 'Fix', body: 'body', head: 'ai-fix/test', base: 'main', headOwner: 'my-fork-user',
+    });
+    assert.equal(pr.number, 9);
+  });
+
+  it('an explicit authToken is used verbatim instead of GITHUB_TOKEN/the App path', async () => {
+    process.env.GITHUB_TOKEN = 'should-not-be-used';
+    let capturedAuth = '';
+    mockFetch((url, init) => {
+      capturedAuth = (init.headers as Record<string, string>).Authorization;
+      return { status: 201, body: { number: 1, html_url: 'https://github.com/octocat/Hello-World/pull/1' } };
+    });
+    const client = new GitHubProviderClient();
+    await client.createPullRequest('user-1', {
+      owner: 'octocat', repo: 'Hello-World', title: 'Fix', body: 'body', head: 'ai-fix/test', base: 'main', authToken: 'user-oauth-token-xyz',
+    });
+    assert.equal(capturedAuth, 'Bearer user-oauth-token-xyz');
+  });
+});
+
+describe('GitHubProviderClient — createIssue (roadmap Phase 7 — distinct from createPullRequest, never a branch/commit/PR)', () => {
+  beforeEach(() => { process.env.GITHUB_TOKEN = 'test-token'; });
+
+  it('creates an issue and returns its number/url', async () => {
+    mockFetch((url, init) => {
+      assert.match(url, /\/repos\/octocat\/Hello-World\/issues$/);
+      assert.equal(init.method, 'POST');
+      const body = JSON.parse(init.body as string);
+      assert.equal(body.title, 'Empty button');
+      assert.deepEqual(body.labels, ['accessibility', 'high']);
+      return { status: 201, body: { number: 7, html_url: 'https://github.com/octocat/Hello-World/issues/7' } };
+    });
+    const client = new GitHubProviderClient();
+    const result = await client.createIssue('user-1', { owner: 'octocat', repo: 'Hello-World', title: 'Empty button', body: 'body text', labels: ['accessibility', 'high'] });
+    assert.equal(result.number, 7);
+    assert.equal(result.url, 'https://github.com/octocat/Hello-World/issues/7');
+  });
+
+  it('a request failure is surfaced as a RepositoryProviderError, never thrown raw', async () => {
+    mockFetch(() => ({ status: 500, body: { message: 'Internal Server Error' } }));
+    const client = new GitHubProviderClient();
+    await assert.rejects(
+      () => client.createIssue('user-1', { owner: 'octocat', repo: 'Hello-World', title: 'Fix', body: 'body' }),
+      (error: unknown) => { assert.ok(error instanceof RepositoryProviderError); return true; },
+    );
+  });
+
+  it('a 403 (missing "Issues: write" App permission, or a real rate limit) is classified the same way createPullRequest already classifies a 403', async () => {
+    mockFetch(() => ({ status: 403, body: { message: 'Resource not accessible by integration' } }));
+    const client = new GitHubProviderClient();
+    await assert.rejects(
+      () => client.createIssue('user-1', { owner: 'octocat', repo: 'Hello-World', title: 'Fix', body: 'body' }),
+      (error: unknown) => { assert.ok(error instanceof RepositoryProviderError); assert.equal(error.category, 'RATE_LIMITED'); return true; },
+    );
+  });
+});
+
+describe('GitHubProviderClient — resolvePrStrategy (non-admin PR creation)', () => {
+  const originalAppId = process.env.GITHUB_APP_ID;
+  const originalAppKey = process.env.GITHUB_APP_PRIVATE_KEY;
+
+  beforeEach(() => {
+    // Isolate every test from the App/GITHUB_TOKEN paths by default — each
+    // test opts back into whichever path it's specifically exercising.
+    process.env.GITHUB_APP_ID = '';
+    process.env.GITHUB_APP_PRIVATE_KEY = '';
+    process.env.GITHUB_TOKEN = '';
+  });
+
+  afterEach(() => {
+    if (originalAppId === undefined) delete process.env.GITHUB_APP_ID; else process.env.GITHUB_APP_ID = originalAppId;
+    if (originalAppKey === undefined) delete process.env.GITHUB_APP_PRIVATE_KEY; else process.env.GITHUB_APP_PRIVATE_KEY = originalAppKey;
+  });
+
+  it('GITHUB_APP_DIRECT — the existing (env-token-fallback) App path is tried first and used unchanged when it succeeds', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_realtoken';
+    let userTokenResolverCalled = false;
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => { userTokenResolverCalled = true; return 'unused'; } });
+
+    const result = await client.resolvePrStrategy('user-1', 'octocat', 'Hello-World');
+    assert.equal(result.strategy, 'GITHUB_APP_DIRECT');
+    assert.equal(result.pushCredentials?.token, 'ghp_realtoken');
+    assert.equal(userTokenResolverCalled, false, 'the App path succeeded — the user-OAuth fallback must never even be consulted');
+  });
+
+  it('USER_DIRECT — App path unusable (no App, no GITHUB_TOKEN) + the user has push access on this exact repo', async () => {
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => 'user-oauth-token' });
+    mockFetchByUrl([
+      {
+        test: /\/repos\/acme-corp\/widgets$/,
+        respond: (_url, init) => {
+          assert.equal((init.headers as Record<string, string>).Authorization, 'Bearer user-oauth-token');
+          return { status: 200, body: { permissions: { push: true }, allow_forking: true, default_branch: 'develop' } };
+        },
+      },
+    ]);
+
+    const result = await client.resolvePrStrategy('user-1', 'acme-corp', 'widgets');
+    assert.equal(result.strategy, 'USER_DIRECT');
+    assert.equal(result.pushCredentials?.token, 'user-oauth-token');
+    assert.equal(result.defaultBranch, 'develop');
+  });
+
+  it('USER_FORK — read-only access but forking allowed: creates (or reuses) a fork and reports it once ready', async () => {
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => 'user-oauth-token' });
+    mockFetchByUrl([
+      { test: /\/repos\/acme-corp\/widgets$/, respond: () => ({ status: 200, body: { permissions: { push: false }, allow_forking: true, default_branch: 'main' } }) },
+      { test: /\/forks$/, method: 'POST', respond: () => ({ status: 202, body: { owner: { login: 'dev-user' }, clone_url: 'https://github.com/dev-user/widgets.git' } }) },
+      { test: /\/repos\/dev-user\/widgets$/, respond: () => ({ status: 200, body: { full_name: 'dev-user/widgets' } }) },
+    ]);
+
+    const result = await client.resolvePrStrategy('user-1', 'acme-corp', 'widgets');
+    assert.equal(result.strategy, 'USER_FORK');
+    assert.equal(result.forkOwner, 'dev-user');
+    assert.equal(result.forkCloneUrl, 'https://github.com/dev-user/widgets.git');
+    assert.equal(result.pushCredentials?.token, 'user-oauth-token');
+  });
+
+  it('USER_FORK preview mode never creates a fork — reports the strategy only', async () => {
+    let forkPostCalled = false;
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => 'user-oauth-token' });
+    mockFetchByUrl([
+      { test: /\/repos\/acme-corp\/widgets$/, respond: () => ({ status: 200, body: { permissions: { push: false }, allow_forking: true, default_branch: 'main' } }) },
+      { test: /\/forks$/, method: 'POST', respond: () => { forkPostCalled = true; return { status: 202, body: {} }; } },
+    ]);
+
+    const result = await client.resolvePrStrategy('user-1', 'acme-corp', 'widgets', undefined, { preview: true });
+    assert.equal(result.strategy, 'USER_FORK');
+    assert.equal(result.pushCredentials, undefined, 'preview must not resolve real push credentials either');
+    assert.equal(forkPostCalled, false, 'preview must never actually create a fork');
+  });
+
+  it('ADMIN_APPROVAL_REQUIRED — read-only access AND forking disabled by the organization', async () => {
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => 'user-oauth-token' });
+    mockFetchByUrl([
+      { test: /\/repos\/acme-corp\/widgets$/, respond: () => ({ status: 200, body: { permissions: { push: false }, allow_forking: false, default_branch: 'main' } }) },
+    ]);
+
+    const result = await client.resolvePrStrategy('user-1', 'acme-corp', 'widgets');
+    assert.equal(result.strategy, 'ADMIN_APPROVAL_REQUIRED');
+    assert.ok(result.detail.length > 0);
+    assert.equal(result.pushCredentials, undefined);
+  });
+
+  it('ADMIN_APPROVAL_REQUIRED — no App AND the user has never connected GitHub for direct push access', async () => {
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => undefined });
+    const result = await client.resolvePrStrategy('user-1', 'acme-corp', 'widgets');
+    assert.equal(result.strategy, 'ADMIN_APPROVAL_REQUIRED');
+    assert.match(result.detail, /App is not installed|connect|administrator/i);
+  });
+
+  it('ADMIN_APPROVAL_REQUIRED — the user has a direct-push connection but cannot even see this repository (404)', async () => {
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => 'user-oauth-token' });
+    mockFetchByUrl([{ test: /\/repos\/acme-corp\/widgets$/, respond: () => ({ status: 404, body: { message: 'Not Found' } }) }]);
+
+    const result = await client.resolvePrStrategy('user-1', 'acme-corp', 'widgets');
+    assert.equal(result.strategy, 'ADMIN_APPROVAL_REQUIRED');
+  });
+
+  it('multi-repo isolation — the SAME user resolves DIFFERENT strategies for two different repos in one run (App-installed repo vs. not)', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_realtoken'; // App path "succeeds" (env fallback) for repo A
+    const client = new GitHubProviderClient({ resolveUserPushToken: async () => 'user-oauth-token' });
+
+    const repoA = await client.resolvePrStrategy('user-1', 'personal-account', 'repo-a');
+    assert.equal(repoA.strategy, 'GITHUB_APP_DIRECT');
+
+    // Simulate "App path no longer available" for repo B by clearing GITHUB_TOKEN and re-resolving —
+    // proves resolution is genuinely per-call, not cached/sticky from repo A's resolution.
+    process.env.GITHUB_TOKEN = '';
+    mockFetchByUrl([{ test: /\/repos\/acme-corp\/repo-b$/, respond: () => ({ status: 200, body: { permissions: { push: true }, allow_forking: true, default_branch: 'main' } }) }]);
+    const repoB = await client.resolvePrStrategy('user-1', 'acme-corp', 'repo-b');
+    assert.equal(repoB.strategy, 'USER_DIRECT');
   });
 });

@@ -26,7 +26,7 @@ const { resolveFixWorkspaceDir } = await import('./repository-fix-worktree.js');
 const { FixWorkflowError, approveFindingFix, reviewFindingFix, sweepExpiredFixWorkflows } = await import('./repository-fix-workflow-service.js');
 
 import type { Issue, Repository, RepositoryFixProposalFileChange, RepositoryFixProposalResponse } from '@origami/contracts';
-import type { RepositoryProviderClient, PullRequestInfo, RepositoryInfo, CreatePullRequestParams } from './repository-provider-client.js';
+import type { RepositoryProviderClient, PullRequestInfo, RepositoryInfo, CreatePullRequestParams, PrStrategyResult } from './repository-provider-client.js';
 import { RepositoryProviderError } from './repository-provider-client.js';
 
 function run(cwd: string, args: string[]) {
@@ -55,6 +55,16 @@ class FakeProviderClient implements RepositoryProviderClient {
   createError: RepositoryProviderError | null = null;
   pushCredentialsError: RepositoryProviderError | null = null;
   repositoryInfo: RepositoryInfo = { defaultBranch: 'main' };
+  /**
+   * Undefined by default, exactly matching real GitLab/BitbucketProviderClient
+   * (no resolvePrStrategy at all) — every existing test in this file that
+   * never sets this exercises the workflow service's original
+   * getPushCredentials/validateRemoteAccess/getRepositoryInfo path unchanged.
+   * Tests for the new GITHUB_APP_DIRECT/USER_DIRECT/USER_FORK/
+   * ADMIN_APPROVAL_REQUIRED branching set this per-test.
+   */
+  resolvePrStrategy?: RepositoryProviderClient['resolvePrStrategy'];
+  lastCreatePrParams?: CreatePullRequestParams;
   private prsByHead = new Map<string, PullRequestInfo>();
 
   constructor(public readonly provider: 'GITHUB' | 'GITLAB' | 'BITBUCKET' = 'GITHUB') {}
@@ -74,11 +84,15 @@ class FakeProviderClient implements RepositoryProviderClient {
 
   async createPullRequest(_userId: string, params: CreatePullRequestParams): Promise<PullRequestInfo> {
     this.createCalls += 1;
+    this.lastCreatePrParams = params;
     if (this.createError) throw this.createError;
-    const existing = this.prsByHead.get(params.head);
+    // A fork PR's real GitHub `head` filter is qualified (headOwner:branch) —
+    // mirror that here so the idempotency-lookup key stays realistic.
+    const headKey = params.headOwner && params.headOwner !== params.owner ? `${params.headOwner}:${params.head}` : params.head;
+    const existing = this.prsByHead.get(headKey);
     if (existing) return { ...existing, alreadyExisted: true };
     const pr: PullRequestInfo = { number: this.prsByHead.size + 1, url: `https://github.com/fake/repo/pull/${this.prsByHead.size + 1}`, alreadyExisted: false };
-    this.prsByHead.set(params.head, pr);
+    this.prsByHead.set(headKey, pr);
     return pr;
   }
 }
@@ -194,6 +208,27 @@ describe('reviewFindingFix', () => {
     const workspaceDir = resolveFixWorkspaceDir(repository.id, review.applicationId);
     fs.writeFileSync(path.join(workspaceDir, 'src/iso.ts'), 'mutated further\n');
     assert.equal(fs.readFileSync(path.join(cloneDir, 'src/iso.ts'), 'utf-8'), 'export const iso = 1;\n');
+  });
+
+  it('a syntactically invalid resulting file surfaces the real parser error (file/validationType/line/column/message), not just a generic message', async () => {
+    const { repository, ownerId, commitSha } = await setupRepository([{ path: 'src/broken.ts', content: 'export function f() {\n  return 1;\n}\n', language: 'typescript' }]);
+    const proposal = buildProposal({
+      repositoryId: repository.id, commitSha,
+      changes: [{ filePath: 'src/broken.ts', language: 'typescript', hunks: [{ startLine: 3, endLine: 3, oldText: '}', newText: '' }] }],
+    });
+    await assert.rejects(
+      () => reviewFindingFix(repository, SAMPLE_FINDING, proposal, stores, { repositoryId: repository.id, ownerId }),
+      (error: unknown) => {
+        assert.ok(error instanceof FixWorkflowError);
+        assert.equal(error.code, 'SYNTAX_VALIDATION_FAILED');
+        assert.ok(error.syntaxError);
+        assert.equal(error.syntaxError!.filePath, 'src/broken.ts');
+        assert.equal(error.syntaxError!.validationType, 'TypeScript syntax');
+        assert.ok(error.syntaxError!.line >= 1);
+        assert.ok(error.syntaxError!.column >= 1);
+        return true;
+      },
+    );
   });
 });
 
@@ -631,5 +666,101 @@ describe('Phase 16/B — Git workflow cross-user IDOR protection', () => {
 
     const result = await withGitEnv(() => approveFindingFix(repository, SAMPLE_FINDING, review.applicationId, proposal, stores, { resolveProvider: () => new FakeProviderClient() }, { repositoryId: repository.id, ownerId: userA }));
     assert.equal(result.status, 'PR_OPENED');
+  });
+});
+
+describe('approveFindingFix — non-admin PR strategies (GITHUB_APP_DIRECT / USER_DIRECT / USER_FORK / ADMIN_APPROVAL_REQUIRED)', () => {
+  it('ADMIN_APPROVAL_REQUIRED — resolvePrStrategy reporting no usable path fails BEFORE any branch/commit/push', async () => {
+    const { repository, ownerId, proposal, review, bareRemote } = await reviewAndApprove([{ path: 'src/admin-required.ts', content: 'export const a = 1;\n', language: 'typescript' }]);
+
+    const provider = new FakeProviderClient();
+    provider.resolvePrStrategy = async () => ({ strategy: 'ADMIN_APPROVAL_REQUIRED', detail: 'Ask an org admin to install the App or grant access.' });
+
+    await assert.rejects(
+      () => withGitEnv(() => approveFindingFix(repository, SAMPLE_FINDING, review.applicationId, proposal, stores, { resolveProvider: () => provider }, { repositoryId: repository.id, ownerId })),
+      (e: unknown) => { assert.ok(e instanceof FixWorkflowError); assert.equal(e.code, 'ADMIN_APPROVAL_REQUIRED'); return true; },
+    );
+
+    assert.equal(provider.createCalls, 0, 'no PR/branch/commit attempt may happen once ADMIN_APPROVAL_REQUIRED is resolved');
+    const refs = run(bareRemote, ['for-each-ref', '--format=%(refname)']);
+    assert.equal(refs.split('\n').filter((r) => r.includes('refs/heads/ai-fix/')).length, 0, 'no branch may exist on the remote');
+  });
+
+  it('USER_DIRECT — resolvePrStrategy\'s own credentials/default branch are used, and branch-collision retry still finds a free name', async () => {
+    const { repository, ownerId, bareRemote, cloneDir, commitSha, proposal, review } = await reviewAndApprove([{ path: 'src/user-direct.ts', content: 'export const b = 1;\n', language: 'typescript' }]);
+
+    // Pre-create the branch name the workflow will generate first, on the
+    // SAME remote USER_DIRECT pushes to — proves collision-retry (attempt 2)
+    // works identically under the new strategy branch, not just the legacy path.
+    const collidingBranch = `ai-fix/${SAMPLE_FINDING.id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toLowerCase()}-missing-form-label`;
+    run(cloneDir, ['checkout', '-b', collidingBranch]);
+    run(cloneDir, ['push', 'origin', collidingBranch]);
+    run(cloneDir, ['checkout', 'main']);
+    run(cloneDir, ['branch', '-D', collidingBranch]);
+
+    const provider = new FakeProviderClient();
+    provider.resolvePrStrategy = async (): Promise<PrStrategyResult> => ({
+      strategy: 'USER_DIRECT',
+      detail: 'Using your own GitHub write access.',
+      pushCredentials: { username: 'x-access-token', token: 'user-oauth-token' },
+      defaultBranch: 'main',
+    });
+
+    const result = await withGitEnv(() => approveFindingFix(repository, SAMPLE_FINDING, review.applicationId, proposal, stores, { resolveProvider: () => provider }, { repositoryId: repository.id, ownerId }));
+    assert.equal(result.status, 'PR_OPENED');
+    assert.equal(result.prStrategy, 'USER_DIRECT');
+    assert.notEqual(result.branchName, collidingBranch, 'must have retried with a non-colliding branch name');
+    assert.equal(result.baseCommitSha, commitSha);
+
+    const remoteBranches = run(bareRemote, ['branch', '-a']).trim();
+    assert.ok(remoteBranches.includes(result.branchName));
+    assert.ok(remoteBranches.includes(collidingBranch), 'the pre-existing colliding branch must be untouched');
+  });
+
+  it('USER_FORK — the branch is pushed to the FORK remote (never origin/the original repo), and the PR is opened with a cross-repo head', async () => {
+    const { repository, ownerId, proposal, review, bareRemote } = await reviewAndApprove([{ path: 'src/user-fork.ts', content: 'export const c = 1;\n', language: 'typescript' }]);
+
+    const forkBareRemote = fs.mkdtempSync(path.join(os.tmpdir(), 'origami-workflow-fork-bare-'));
+    run(forkBareRemote, ['init', '--bare', '--quiet', '--initial-branch=main']);
+    allBareRemotes.push(forkBareRemote);
+
+    const provider = new FakeProviderClient();
+    provider.resolvePrStrategy = async (): Promise<PrStrategyResult> => ({
+      strategy: 'USER_FORK',
+      detail: 'Forked — the pull request will be opened from there.',
+      pushCredentials: { username: 'x-access-token', token: 'user-oauth-token' },
+      forkOwner: 'dev-user',
+      forkCloneUrl: forkBareRemote,
+      defaultBranch: 'main',
+    });
+
+    const result = await withGitEnv(() => approveFindingFix(repository, SAMPLE_FINDING, review.applicationId, proposal, stores, { resolveProvider: () => provider }, { repositoryId: repository.id, ownerId }));
+    assert.equal(result.status, 'PR_OPENED');
+    assert.equal(result.prStrategy, 'USER_FORK');
+
+    // Pushed to the FORK, never to origin (the original company repo).
+    const forkBranches = run(forkBareRemote, ['branch', '-a']).trim();
+    assert.ok(forkBranches.includes(result.branchName));
+    const originBranches = run(bareRemote, ['branch', '-a']).trim();
+    assert.ok(!originBranches.includes(result.branchName), 'the original repository must never receive this branch');
+
+    assert.equal(provider.lastCreatePrParams?.headOwner, 'dev-user');
+    assert.equal(provider.lastCreatePrParams?.authToken, 'user-oauth-token');
+    assert.equal(provider.lastCreatePrParams?.owner, 'octocat', 'the PR must still be opened against the ORIGINAL (base) repo owner, not the fork');
+  });
+
+  it('GITHUB_APP_DIRECT via resolvePrStrategy behaves identically to a provider with no resolvePrStrategy at all', async () => {
+    const { repository, ownerId, proposal, review } = await reviewAndApprove([{ path: 'src/app-direct.ts', content: 'export const d = 1;\n', language: 'typescript' }]);
+
+    const provider = new FakeProviderClient();
+    provider.resolvePrStrategy = async (): Promise<PrStrategyResult> => ({
+      strategy: 'GITHUB_APP_DIRECT',
+      detail: 'The Origami Lens GitHub App is installed on this repository.',
+      pushCredentials: { username: 'x-access-token', token: 'fake-push-token' },
+    });
+
+    const result = await withGitEnv(() => approveFindingFix(repository, SAMPLE_FINDING, review.applicationId, proposal, stores, { resolveProvider: () => provider }, { repositoryId: repository.id, ownerId }));
+    assert.equal(result.status, 'PR_OPENED');
+    assert.equal(result.prStrategy, 'GITHUB_APP_DIRECT');
   });
 });

@@ -70,7 +70,14 @@ export interface ScanResult {
   };
 }
 
+// build.mjs replaces this at build time via esbuild's `define`
+// (import.meta.env.DASHBOARD_BASE never exists at actual runtime — it's a
+// Vite-style compile-time constant, not a real global). The `?? 'http://
+// localhost:5173/scans/'` fallback only matters when this module is
+// imported unbundled (e.g. tsx running a *.test.ts directly, which imports
+// the real .ts source, not the built bundle) — production always gets the
+// replaced literal, never the fallback.
 export const DASHBOARD_BASE =
-  (import.meta as unknown as { env: { DASHBOARD_BASE: string } }).env.DASHBOARD_BASE;
+  (import.meta as unknown as { env?: { DASHBOARD_BASE?: string } }).env?.DASHBOARD_BASE ?? 'http://localhost:5173/scans/';
 
 export const API_BASE = 'http://localhost:3100';

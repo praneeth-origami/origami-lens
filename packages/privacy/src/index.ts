@@ -27,9 +27,24 @@ const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
  * phone numbers, or tracking numbers in existing scan evidence.
  */
 const CREDIT_CARD_PATTERN = /\b(?:\d{4}[ -]){3}\d{4}\b|\b3[47]\d{2}[ -]?\d{6}[ -]?\d{5}\b|\b\d{15,16}\b/g;
+/**
+ * A sensitive-named key followed by its value, as either a URL query
+ * parameter (`?token=abc123`) or a plain `key: value`/`key=value` pair in
+ * free text (e.g. a console.error message or network request URL) —
+ * distinct from the JWT/Bearer/API-key patterns above, which only match
+ * specific VALUE shapes regardless of the key name. Found missing while
+ * building Create Bug Report: a network error's own URL (`...?token=...`)
+ * or a thrown error's message (`password=...`) passed straight through
+ * scrubString untouched, since neither looks like a JWT/Bearer/sk- token.
+ * The key name and separator are preserved — only the value is redacted —
+ * so a report can still say "this request included a token" without
+ * leaking it.
+ */
+const SENSITIVE_PARAM_PATTERN = /\b(password|passwd|token|access_token|refresh_token|api[_-]?key|apikey|secret|session(?:_?id)?|auth(?:orization)?|cookie|credit_card|cvv|cvc|ssn)(\s*[=:]\s*)("[^"&]*"|'[^'&]*'|[^&\s,;"']+)/gi;
 
 export function scrubString(value: string): string {
   let result = value;
+  result = result.replace(SENSITIVE_PARAM_PATTERN, (_match, key: string, sep: string) => `${key}${sep}[REDACTED]`);
   result = result.replace(JWT_PATTERN, '[REDACTED_JWT]');
   result = result.replace(BEARER_PATTERN, 'Bearer [REDACTED]');
   // Deliberately does not contain "api"+"key" — API_KEY_PATTERN matches that

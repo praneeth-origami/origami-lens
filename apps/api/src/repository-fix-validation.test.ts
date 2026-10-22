@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyHunkToContent, applyLineEndingStyle, detectDominantLineEnding, locateOldText, validateSyntax } from './repository-fix-validation.js';
+import { applyHunkToContent, applyLineEndingStyle, detectDominantLineEnding, locateOldText, validateSyntax, validateSyntaxDetailed } from './repository-fix-validation.js';
 
 describe('locateOldText', () => {
   it('TEST 1 — locates a single exact match and computes the real line range', () => {
@@ -108,6 +108,43 @@ describe('validateSyntax', () => {
   it('an unrecognized language string also reports UNSUPPORTED rather than throwing', async () => {
     const status = await validateSyntax('cobol', 'IDENTIFICATION DIVISION.');
     assert.equal(status, 'UNSUPPORTED');
+  });
+});
+
+describe('validateSyntaxDetailed', () => {
+  it('returns the same VALID verdict as validateSyntax, with no error detail', async () => {
+    const result = await validateSyntaxDetailed('typescript', 'export function add(a: number, b: number): number {\n  return a + b;\n}\n');
+    assert.equal(result.status, 'VALID');
+    assert.equal(result.errorDetail, undefined);
+  });
+
+  it('returns the same INVALID verdict as validateSyntax, plus a real line/column/message', async () => {
+    const result = await validateSyntaxDetailed('typescript', 'export function add(a: number, b: number): number {\n  return a + b;\n');
+    assert.equal(result.status, 'INVALID');
+    assert.ok(result.errorDetail);
+    assert.ok(result.errorDetail!.line >= 1);
+    assert.ok(result.errorDetail!.column >= 1);
+    assert.ok(result.errorDetail!.message.length > 0);
+  });
+
+  it('returns UNSUPPORTED with no error detail for a non-parseable language', async () => {
+    const result = await validateSyntaxDetailed('html', '<div>not even well-formed<span></div>');
+    assert.equal(result.status, 'UNSUPPORTED');
+    assert.equal(result.errorDetail, undefined);
+  });
+
+  it('never disagrees with validateSyntax on the same input (same underlying parse, just more detail)', async () => {
+    const samples: Array<[string, string]> = [
+      ['typescript', 'export const x: number = 1;\n'],
+      ['typescript', 'export const x: number = ;\n'],
+      ['json', '{"a": 1}'],
+      ['json', '{"a": 1,'],
+    ];
+    for (const [language, content] of samples) {
+      const status = await validateSyntax(language, content);
+      const detailed = await validateSyntaxDetailed(language, content);
+      assert.equal(detailed.status, status);
+    }
   });
 });
 

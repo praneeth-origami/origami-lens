@@ -88,3 +88,23 @@ export const GRAMMAR_WASM_FILE: Partial<Record<DetectedLanguage, string>> = {
 export function isParseableLanguage(language: DetectedLanguage): boolean {
   return language in GRAMMAR_WASM_FILE;
 }
+
+/** Human-readable label for a syntax-validation failure message (e.g. "Fix validation failed / Validation: TypeScript / TSX syntax") — display only, never used for detection/parsing decisions. */
+const VALIDATION_TYPE_LABEL: Partial<Record<DetectedLanguage, string>> = {
+  typescript: 'TypeScript syntax',
+  tsx: 'TypeScript / TSX syntax',
+  javascript: 'JavaScript syntax',
+  jsx: 'JavaScript / JSX syntax',
+  python: 'Python syntax',
+  java: 'Java syntax',
+  go: 'Go syntax',
+  rust: 'Rust syntax',
+  c: 'C syntax',
+  cpp: 'C++ syntax',
+  css: 'CSS syntax',
+  json: 'JSON syntax',
+};
+
+export function syntaxValidationTypeLabel(language: string): string {
+  return VALIDATION_TYPE_LABEL[language as DetectedLanguage] ?? `${language} syntax`;
+}

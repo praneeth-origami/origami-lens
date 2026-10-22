@@ -39,6 +39,31 @@ import {
   resolveRepositoryQaConfig,
 } from './repository-qa-provider.js';
 import {
+  PageQaCancelledError,
+  PageQaInvalidResponseError,
+  PageQaTimeoutError,
+  PageQaUnavailableError,
+  answerPageQuestion,
+  resolvePageQaConfig,
+} from './page-qa-provider.js';
+import {
+  MonitoringAskCancelledError,
+  MonitoringAskInvalidResponseError,
+  MonitoringAskTimeoutError,
+  MonitoringAskUnavailableError,
+  answerMonitoringQuestion,
+  resolveMonitoringAskConfig,
+} from './monitoring-ask-provider.js';
+import {
+  ElementQaCancelledError,
+  ElementQaInvalidResponseError,
+  ElementQaTimeoutError,
+  ElementQaUnavailableError,
+  answerElementQuestion,
+  resolveElementQaConfig,
+  type ElementQaAction,
+} from './element-qa-provider.js';
+import {
   FindingFixCancelledError,
   FindingFixInvalidResponseError,
   FindingFixTimeoutError,
@@ -331,6 +356,118 @@ app.post<{ Body: { query: string; contextText: string } }>('/answer-repository-q
     if (error instanceof RepositoryQaTimeoutError) return reply.status(504).send({ error: error.message, errorCategory: 'LLM_TIMEOUT' });
     if (error instanceof RepositoryQaInvalidResponseError) return reply.status(502).send({ error: error.message, errorCategory: 'LLM_INVALID_RESPONSE' });
     if (error instanceof RepositoryQaUnavailableError) return reply.status(503).send({ error: error.message, errorCategory: 'LLM_PROVIDER_UNAVAILABLE' });
+    throw error;
+  } finally {
+    reply.raw.off('close', onClose);
+  }
+});
+
+/**
+ * "Ask About This Page" (Phase 2 of the roadmap audit) — same isolation
+ * posture as /answer-repository-question directly above: never routed
+ * through /gateway/OrigamiAiGateway/TASK_MODEL_MAP, never added to the
+ * AiTask union. Distinct from /ask (the stateless live-evidence
+ * passthrough): apps/api builds contextText from a scan/page_scans row's
+ * PERSISTED, already privacy-scrubbed evidence, never from client-supplied
+ * live evidence.
+ */
+app.post<{ Body: { question: string; contextText: string } }>('/answer-page-question', async (request, reply) => {
+  const body = request.body ?? ({} as typeof request.body);
+  if (typeof body.question !== 'string' || !body.question.trim() || typeof body.contextText !== 'string') {
+    return reply.status(400).send({ error: 'question and contextText are required' });
+  }
+
+  // Same privacy posture as /answer-repository-question: never send unscrubbed text to a model server, even though apps/api's contextText is already built from scrubbed-at-rest evidence.
+  const scrubbedQuestion = scrubString(body.question);
+  const scrubbedContext = scrubString(body.contextText);
+
+  const controller = new AbortController();
+  const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+  reply.raw.on('close', onClose);
+
+  try {
+    const result = await answerPageQuestion(resolvePageQaConfig(), { question: scrubbedQuestion, contextText: scrubbedContext }, controller.signal);
+    return result;
+  } catch (error) {
+    if (error instanceof PageQaCancelledError) return reply.status(499).send({ error: error.message, errorCategory: 'LLM_CANCELLED' });
+    if (error instanceof PageQaTimeoutError) return reply.status(504).send({ error: error.message, errorCategory: 'LLM_TIMEOUT' });
+    if (error instanceof PageQaInvalidResponseError) return reply.status(502).send({ error: error.message, errorCategory: 'LLM_INVALID_RESPONSE' });
+    if (error instanceof PageQaUnavailableError) return reply.status(503).send({ error: error.message, errorCategory: 'LLM_PROVIDER_UNAVAILABLE' });
+    throw error;
+  } finally {
+    reply.raw.off('close', onClose);
+  }
+});
+
+/**
+ * "Why did my website score drop?" (Continuous Monitoring, V3) — explains
+ * an ALREADY-DETECTED regression (apps/api's deterministic regression
+ * engine runs first; this only ever explains its output, never decides
+ * whether a regression exists). Same isolation posture as
+ * /answer-page-question directly above: never routed through
+ * /gateway/OrigamiAiGateway/TASK_MODEL_MAP.
+ */
+app.post<{ Body: { question: string; contextText: string } }>('/explain-monitoring-regression', async (request, reply) => {
+  const body = request.body ?? ({} as typeof request.body);
+  if (typeof body.question !== 'string' || !body.question.trim() || typeof body.contextText !== 'string') {
+    return reply.status(400).send({ error: 'question and contextText are required' });
+  }
+
+  const scrubbedQuestion = scrubString(body.question);
+  const scrubbedContext = scrubString(body.contextText);
+
+  const controller = new AbortController();
+  const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+  reply.raw.on('close', onClose);
+
+  try {
+    const result = await answerMonitoringQuestion(resolveMonitoringAskConfig(), { question: scrubbedQuestion, contextText: scrubbedContext }, controller.signal);
+    return result;
+  } catch (error) {
+    if (error instanceof MonitoringAskCancelledError) return reply.status(499).send({ error: error.message, errorCategory: 'LLM_CANCELLED' });
+    if (error instanceof MonitoringAskTimeoutError) return reply.status(504).send({ error: error.message, errorCategory: 'LLM_TIMEOUT' });
+    if (error instanceof MonitoringAskInvalidResponseError) return reply.status(502).send({ error: error.message, errorCategory: 'LLM_INVALID_RESPONSE' });
+    if (error instanceof MonitoringAskUnavailableError) return reply.status(503).send({ error: error.message, errorCategory: 'LLM_PROVIDER_UNAVAILABLE' });
+    throw error;
+  } finally {
+    reply.raw.off('close', onClose);
+  }
+});
+
+const VALID_ELEMENT_QA_ACTIONS = new Set<ElementQaAction>(['explain', 'fix', 'improve', 'make_responsive']);
+
+/**
+ * "Select Anything" element actions (Phase 3 of the roadmap audit) — same
+ * isolation posture as /answer-page-question directly above: never routed
+ * through /gateway/OrigamiAiGateway/TASK_MODEL_MAP. apps/api builds
+ * contextText from a scrubbed ComponentEvidence (element-qa-context.ts),
+ * never from the raw captured DOM.
+ */
+app.post<{ Body: { action: string; contextText: string; instruction?: string } }>('/answer-element-question', async (request, reply) => {
+  const body = request.body ?? ({} as typeof request.body);
+  if (!VALID_ELEMENT_QA_ACTIONS.has(body.action as ElementQaAction) || typeof body.contextText !== 'string') {
+    return reply.status(400).send({ error: `action must be one of ${[...VALID_ELEMENT_QA_ACTIONS].join(', ')}, and contextText is required` });
+  }
+
+  const scrubbedContext = scrubString(body.contextText);
+  const scrubbedInstruction = body.instruction ? scrubString(body.instruction) : undefined;
+
+  const controller = new AbortController();
+  const onClose = () => { if (!reply.raw.writableEnded) controller.abort(); };
+  reply.raw.on('close', onClose);
+
+  try {
+    const result = await answerElementQuestion(
+      resolveElementQaConfig(),
+      { action: body.action as ElementQaAction, contextText: scrubbedContext, instruction: scrubbedInstruction },
+      controller.signal,
+    );
+    return result;
+  } catch (error) {
+    if (error instanceof ElementQaCancelledError) return reply.status(499).send({ error: error.message, errorCategory: 'LLM_CANCELLED' });
+    if (error instanceof ElementQaTimeoutError) return reply.status(504).send({ error: error.message, errorCategory: 'LLM_TIMEOUT' });
+    if (error instanceof ElementQaInvalidResponseError) return reply.status(502).send({ error: error.message, errorCategory: 'LLM_INVALID_RESPONSE' });
+    if (error instanceof ElementQaUnavailableError) return reply.status(503).send({ error: error.message, errorCategory: 'LLM_PROVIDER_UNAVAILABLE' });
     throw error;
   } finally {
     reply.raw.off('close', onClose);

@@ -68,6 +68,25 @@ describe('proposeFindingFix', () => {
     await assert.rejects(() => proposeFindingFix(CONFIG, { contextText: 'c' }), FindingFixInvalidResponseError);
   });
 
+  it('a response missing required fields logs a safe diagnostic (top-level key names + field types, never the response content itself)', async () => {
+    mockFetchOnce(() => chatResponse({ status: 'PROPOSED', unexpectedKey: 'SECRET_VALUE_MARKER' }));
+    const originalConsoleError = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+    try {
+      await assert.rejects(() => proposeFindingFix(CONFIG, { contextText: 'c' }), FindingFixInvalidResponseError);
+    } finally {
+      console.error = originalConsoleError;
+    }
+    const combined = logged.join('\n');
+    assert.ok(!combined.includes('SECRET_VALUE_MARKER'), 'must never log field VALUES, only key names/types');
+    assert.ok(combined.includes('repository_finding_fix_llm_response_missing_fields'));
+    assert.ok(combined.includes('"parsedTopLevelKeys":["status","unexpectedKey"]'));
+    assert.ok(combined.includes('"statusType":"string"'));
+    assert.ok(combined.includes('"summaryType":"undefined"'));
+    assert.ok(combined.includes('"reasoningType":"undefined"'));
+  });
+
   it('rejects non-JSON model output', async () => {
     mockFetchOnce(() => chatResponse('not json at all'));
     await assert.rejects(() => proposeFindingFix(CONFIG, { contextText: 'c' }), FindingFixInvalidResponseError);
@@ -98,7 +117,7 @@ describe('proposeFindingFix', () => {
   });
 
   describe('Bugfix: a real truncated response (finish_reason "length") is classified as an invalid response, not provider-unavailable', () => {
-    it('a response truncated mid-string (unterminated string) is rejected as FindingFixInvalidResponseError, carrying the real content length', async () => {
+    it('a response truncated mid-string (unterminated string) is rejected as FindingFixInvalidResponseError, carrying the real content length but never the raw parse-error reason (which can echo back real source text — see the thrown message\'s doc comment)', async () => {
       const truncated = '{"status":"PROPOSED","summary":"Fix the thing","reasoning":"Because","changes":[{"filePath":"a.ts","language":"typescript","hunks":[{"startLine":1,"endLine":1,"oldText":"const x = 1;","newText":"const x = 2; // this string never closes';
       mockFetchOnce(() => truncatedChatResponse(truncated));
       await assert.rejects(
@@ -106,7 +125,7 @@ describe('proposeFindingFix', () => {
         (error: unknown) => {
           assert.ok(error instanceof FindingFixInvalidResponseError);
           assert.ok(error.message.includes(`length=${truncated.length}`));
-          assert.ok(/unterminated string/i.test(error.message) || /unexpected end/i.test(error.message));
+          assert.ok(!error.message.includes(truncated), 'must never echo the raw response content back to the caller');
           return true;
         },
       );
@@ -248,6 +267,19 @@ describe('proposeFindingFix', () => {
     assert.match(systemContent, /plain prose only/i);
     assert.match(systemContent, /role="main"/);
     assert.match(systemContent, /must be escaped/i);
+  });
+
+  it('the system prompt requires oldText to be an exact character-for-character copy and forbids blending near-duplicate blocks', async () => {
+    let capturedBody: { messages: Array<{ role: string; content: string }> } | undefined;
+    mockFetchOnce((_input, init) => {
+      capturedBody = JSON.parse(init!.body as string);
+      return chatResponse({ status: 'INSUFFICIENT_EVIDENCE', summary: 'S', reasoning: 'R', changes: [] });
+    });
+    await proposeFindingFix(CONFIG, { contextText: 'c' });
+    const systemContent = capturedBody!.messages[0].content;
+    assert.match(systemContent, /character-for-character/i);
+    assert.match(systemContent, /never blend, merge, or average/i);
+    assert.match(systemContent, /clean, self-contained boundary/i);
   });
 
   it('a well-formed response that completed normally (finish_reason "stop") parses successfully', async () => {

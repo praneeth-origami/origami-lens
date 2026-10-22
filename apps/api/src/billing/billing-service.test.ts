@@ -50,18 +50,47 @@ describe('createCheckoutSession', () => {
     );
   });
 
-  it('rejects FREE and inactive (AGENCY) plans with INVALID_PLAN', async () => {
+  it('rejects FREE (never purchasable) with INVALID_PLAN', async () => {
     const fakeStripe = {} as unknown as Stripe;
-    for (const plan of ['FREE', 'AGENCY'] as const) {
-      await assert.rejects(
-        () => createCheckoutSession(
-          { stripe: fakeStripe, subscriptionRepo: fakeSubscriptionRepo(), webAppBaseUrl: 'http://localhost:5173', organizationName: 'Org' },
-          'org-1',
-          { plan, interval: 'MONTHLY' },
-        ),
-        (error: unknown) => error instanceof BillingError && error.code === 'INVALID_PLAN',
-      );
-    }
+    await assert.rejects(
+      () => createCheckoutSession(
+        { stripe: fakeStripe, subscriptionRepo: fakeSubscriptionRepo(), webAppBaseUrl: 'http://localhost:5173', organizationName: 'Org' },
+        'org-1',
+        { plan: 'FREE', interval: 'MONTHLY' },
+      ),
+      (error: unknown) => error instanceof BillingError && error.code === 'INVALID_PLAN',
+    );
+  });
+
+  it('Agency plan (V4): is active and purchasable, rejecting only on missing Stripe price configuration (BILLING_NOT_CONFIGURED), never INVALID_PLAN', async () => {
+    const fakeStripe = {} as unknown as Stripe;
+    await assert.rejects(
+      () => createCheckoutSession(
+        { stripe: fakeStripe, subscriptionRepo: fakeSubscriptionRepo(), webAppBaseUrl: 'http://localhost:5173', organizationName: 'Org' },
+        'org-1',
+        { plan: 'AGENCY', interval: 'MONTHLY' },
+      ),
+      (error: unknown) => error instanceof BillingError && error.code === 'BILLING_NOT_CONFIGURED',
+    );
+  });
+
+  it('Agency plan (V4): succeeds once a Stripe price is configured, with no seat line item (no purchasable extra-seat add-on)', async () => {
+    process.env.STRIPE_PRICE_AGENCY_MONTHLY = 'price_agency_month';
+    const createCalls: unknown[] = [];
+    const fakeStripe = {
+      customers: { create: async () => ({ id: 'cus_1' }) },
+      checkout: { sessions: { create: async (params: unknown) => { createCalls.push(params); return { url: 'https://checkout.stripe.com/session' }; } } },
+    } as unknown as Stripe;
+    const result = await createCheckoutSession(
+      { stripe: fakeStripe, subscriptionRepo: fakeSubscriptionRepo(), webAppBaseUrl: 'http://localhost:5173', organizationName: 'Org' },
+      'org-1',
+      { plan: 'AGENCY', interval: 'MONTHLY' },
+    );
+    assert.equal(result.url, 'https://checkout.stripe.com/session');
+    assert.equal(createCalls.length, 1);
+    const lineItems = (createCalls[0] as { line_items: Array<{ price: string }> }).line_items;
+    assert.deepEqual(lineItems, [{ price: 'price_agency_month', quantity: 1 }]);
+    delete process.env.STRIPE_PRICE_AGENCY_MONTHLY;
   });
 
   it('rejects a Team seat count below the included minimum with SEAT_COUNT_INVALID', async () => {

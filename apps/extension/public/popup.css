@@ -159,6 +159,12 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .view {
+    animation: none;
+  }
+}
+
 /* Typography */
 .page-title {
   font-size: 18px;
@@ -1021,6 +1027,122 @@ body {
   word-break: break-word;
 }
 
+/* Auth required — a real permission state (not a failure), so it gets a
+   calmer, purple/indigo treatment instead of the red error styling above. */
+.auth-hero {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
+.auth-hero-glow {
+  position: absolute;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(91, 76, 219, 0.18), transparent 72%);
+}
+
+.auth-hero-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(155deg, var(--primary), var(--primary-hover));
+  color: #fff;
+  box-shadow: var(--shadow-md);
+  animation: auth-hero-in 320ms ease;
+}
+
+@keyframes auth-hero-in {
+  from { opacity: 0; transform: scale(0.85) translateY(3px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+#view-auth-required .page-title,
+#view-auth-required .page-subtitle {
+  text-align: center;
+}
+
+.auth-benefits {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.auth-benefit {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.auth-benefit-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.auth-benefit-icon.scan { background: var(--primary-muted); color: var(--primary); }
+.auth-benefit-icon.secure { background: var(--success-muted); color: var(--success); }
+.auth-benefit-icon.unlock { background: var(--warning-muted); color: var(--warning); }
+
+.auth-benefit-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.auth-benefit-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.auth-benefit-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.btn-auth-signin {
+  gap: 6px;
+}
+
+.btn-auth-signin .btn-arrow {
+  transition: transform var(--transition);
+}
+
+.btn-auth-signin:hover .btn-arrow {
+  transform: translateX(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-hero-icon {
+    animation: none;
+  }
+  .btn-auth-signin .btn-arrow {
+    transition: none;
+  }
+  .btn-auth-signin:hover .btn-arrow {
+    transform: none;
+  }
+}
+
 /* Scrollbar */
 .app-main::-webkit-scrollbar,
 .issues-preview::-webkit-scrollbar,
@@ -1035,4 +1157,91 @@ body {
 .detail-card pre::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border-radius: 2px;
+}
+
+/* Lens notifications — "Lens Active" (in progress) / "Lens Event" (completed,
+   informational) / "Lens Alert" (error/warning). One small, reused banner
+   convention instead of a generic toast library, matching the content
+   script's own showToast for in-page notices. */
+.lens-banner {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+}
+
+.lens-banner.active {
+  background: var(--primary-muted);
+  color: var(--primary);
+}
+
+.lens-banner.event {
+  background: var(--success-muted);
+  color: var(--success);
+}
+
+.lens-banner.alert {
+  background: var(--danger-muted);
+  color: var(--danger);
+}
+
+/* Responsive Testing */
+.button-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.button-row .btn {
+  width: auto;
+  flex: 1 1 auto;
+}
+
+.responsive-issue-screenshot {
+  display: block;
+  width: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.responsive-viewport-list li {
+  cursor: default;
+}
+
+.responsive-viewport-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  cursor: pointer;
+  background: none;
+  border: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+}
+
+.responsive-viewport-row:disabled {
+  cursor: default;
+}
+
+.responsive-viewport-label {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.responsive-viewport-count {
+  font-size: 10px;
+}
+
+.responsive-viewport-count.ok { color: var(--success); }
+.responsive-viewport-count.has-issues { color: var(--danger); }
+
+.responsive-viewport-issues {
+  padding: 0 10px 8px;
 }

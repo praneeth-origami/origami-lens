@@ -1,5 +1,5 @@
 import type { EvidencePayload } from '../types/scan.js';
-import { cancelElementSelection, startElementSelection } from './selection-overlay.js';
+import { cancelElementSelection, captureBugReportEvidence, selectElementBySelector, startElementSelection } from './selection-overlay.js';
 
 function getSelector(el: Element): string {
   if (el.id) return `#${CSS.escape(el.id)}`;
@@ -116,6 +116,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'CANCEL_ELEMENT_SELECTION') {
     cancelElementSelection();
     sendResponse({ success: true });
+  }
+
+  if (message.type === 'SELECT_ELEMENT_BY_SELECTOR') {
+    try {
+      sendResponse(selectElementBySelector(message.selector, message.autoAction));
+    } catch (error) {
+      sendResponse({
+        success: false,
+        error: error instanceof Error ? error.message : 'Could not select this element on the page.',
+      });
+    }
+  }
+
+  if (message.type === 'COLLECT_BUG_REPORT_EVIDENCE') {
+    captureBugReportEvidence()
+      .then((result) => sendResponse({ success: true, result }))
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Could not capture evidence from this page.',
+        });
+      });
+    return true;
   }
 
   return true;

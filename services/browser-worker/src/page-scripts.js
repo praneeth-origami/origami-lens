@@ -98,6 +98,40 @@ export function collectPageEvidence() {
     }
   });
 
+  // Automatic Responsive Testing (roadmap Phase 4) — overlap detection.
+  // Heuristic, not exhaustive: flags pairs of prominent nav/header/logo-ish
+  // elements whose bounding boxes intersect by a meaningful fraction of the
+  // smaller element's area. Restricted to nav/header/branding-shaped
+  // selectors (rather than every element pair, which would be O(n^2) noise
+  // dominated by intentional overlaps like icon-on-button) because
+  // "navigation overlaps logo" is the concrete, high-value case the roadmap
+  // calls out; capped to the first 30 candidates and first 10 findings.
+  var overlapCandidates = Array.from(document.querySelectorAll(
+    'nav, header, [role="navigation"], [class*="nav" i], [class*="logo" i], [class*="brand" i], [class*="header" i]',
+  )).slice(0, 30);
+  var overlappingElements = [];
+  for (var oi = 0; oi < overlapCandidates.length && overlappingElements.length < 10; oi++) {
+    for (var oj = oi + 1; oj < overlapCandidates.length && overlappingElements.length < 10; oj++) {
+      var elA = overlapCandidates[oi];
+      var elB = overlapCandidates[oj];
+      if (elA.contains(elB) || elB.contains(elA)) continue; // parent/child nesting is not an overlap bug
+      var rectA = elA.getBoundingClientRect();
+      var rectB = elB.getBoundingClientRect();
+      var ix = Math.max(0, Math.min(rectA.right, rectB.right) - Math.max(rectA.left, rectB.left));
+      var iy = Math.max(0, Math.min(rectA.bottom, rectB.bottom) - Math.max(rectA.top, rectB.top));
+      var intersectionArea = ix * iy;
+      if (intersectionArea <= 0) continue;
+      var smallerArea = Math.min(rectA.width * rectA.height, rectB.width * rectB.height);
+      if (smallerArea <= 0 || intersectionArea / smallerArea < 0.2) continue;
+      overlappingElements.push({
+        selector: getSelector(elA) + ' + ' + getSelector(elB),
+        tag: elA.tagName.toLowerCase(),
+        attributes: {},
+        boundingBox: { x: rectA.x, y: rectA.y, width: rectA.width, height: rectA.height },
+      });
+    }
+  }
+
   var perf = performance.getEntriesByType('navigation')[0];
   var navTiming = {};
   if (perf) {
@@ -120,6 +154,7 @@ export function collectPageEvidence() {
       overflowWidth: horizontalOverflow ? docWidth - vpWidth : 0,
       elementsOutsideViewport: outsideViewport.slice(0, 20),
       fixedWidthElements: [],
+      overlappingElements: overlappingElements,
     },
     dom: {
       headings: collectElements('h1, h2, h3, h4, h5, h6'),

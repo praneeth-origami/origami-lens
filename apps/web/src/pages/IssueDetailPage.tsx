@@ -2,13 +2,18 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import type {
   AggregatedIssue,
+  GitHubIssueLink,
   HealthScore,
   Issue,
   IssueStatus,
   Repository,
   RepositoryFixApproveResponse,
+  RepositoryFixGroundingDiagnostic,
   RepositoryFixProposalResponse,
+  RepositoryFixRevisionMismatchDiagnostic,
   RepositoryFixReviewResponse,
+  RepositoryFixSyntaxErrorDetail,
+  RepositoryPrStrategyPreviewResponse,
 } from '@origami/contracts';
 import type { RepositoryResolution } from '@origami/contracts';
 import {
@@ -17,6 +22,7 @@ import {
   askAi,
   fetchIssue,
   fetchRepositories,
+  fetchRepositoryPrStrategy,
   fetchRepositoryResolution,
   fetchScan,
   proposeRepositoryFindingFix,
@@ -72,6 +78,8 @@ export function IssueDetailPage() {
   const [aiFixInstruction, setAiFixInstruction] = useState('');
   const [aiFixLoading, setAiFixLoading] = useState(false);
   const [aiFixError, setAiFixError] = useState<string | null>(null);
+  /** Set only when aiFixError's failure was PROPOSAL_UNGROUNDED or SOURCE_REVISION_MISMATCH — hashes/metadata only (never raw source), so the UI can show exactly which file/hunk/commit failed grounding. */
+  const [aiFixDiagnostic, setAiFixDiagnostic] = useState<RepositoryFixGroundingDiagnostic | RepositoryFixRevisionMismatchDiagnostic | null>(null);
   const [aiFixProposal, setAiFixProposal] = useState<RepositoryFixProposalResponse | null>(null);
   const [aiFixDecision, setAiFixDecision] = useState<'approved' | 'rejected' | null>(null);
 
@@ -82,10 +90,20 @@ export function IssueDetailPage() {
   const [reviewResponse, setReviewResponse] = useState<RepositoryFixReviewResponse | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  /** Set only when reviewError's failure was SYNTAX_VALIDATION_FAILED — the real parser's file/line/column/message, so the UI can show exactly why the proposed fix was rejected instead of just the generic message. */
+  const [reviewSyntaxError, setReviewSyntaxError] = useState<RepositoryFixSyntaxErrorDetail | null>(null);
   const [confirmingPr, setConfirmingPr] = useState(false);
   const [prLoading, setPrLoading] = useState(false);
   const [prError, setPrError] = useState<string | null>(null);
   const [prResult, setPrResult] = useState<RepositoryFixApproveResponse | null>(null);
+  /** True only when the approval failed with the ADMIN_APPROVAL_REQUIRED error code — rendered as an explanatory state, not a generic error (see IssueFixWithAi). */
+  const [prAdminApprovalRequired, setPrAdminApprovalRequired] = useState(false);
+
+  // Preview of which PR method WOULD be used for the selected repository —
+  // resolved fresh per repositoryId (never a global/cached value, see
+  // resolvePrStrategy) so the user can see "GitHub App" / "your GitHub
+  // access" / "fork + PR" / "needs admin approval" before ever approving a fix.
+  const [prStrategyPreview, setPrStrategyPreview] = useState<RepositoryPrStrategyPreviewResponse | null>(null);
 
   useEffect(() => {
     if (!issueId) return;
@@ -105,11 +123,17 @@ export function IssueDetailPage() {
       .finally(() => setLoading(false));
   }, [issueId]);
 
-  useEffect(() => {
+  const loadRepositories = () => {
     fetchRepositories()
       .then((res) => setRepositories(res.repositories))
       .catch(() => setRepositories([]));
-  }, []);
+  };
+
+  // Re-exposed to CreateGitHubIssueButton (via IssueHeader) so connecting a
+  // NEW repository from its in-context "+ Connect a repository" form
+  // immediately shows up here too — one repositories list, never a second
+  // fetch living only inside that component.
+  useEffect(loadRepositories, []);
 
   useEffect(() => {
     if (!issueId) return;
@@ -121,10 +145,37 @@ export function IssueDetailPage() {
       .catch(() => setResolution(null));
   }, [issueId]);
 
+  useEffect(() => {
+    if (!selectedRepoId) {
+      setPrStrategyPreview(null);
+      return;
+    }
+    let cancelled = false;
+    fetchRepositoryPrStrategy(selectedRepoId)
+      .then((res) => { if (!cancelled) setPrStrategyPreview(res); })
+      .catch(() => { if (!cancelled) setPrStrategyPreview(null); });
+    return () => { cancelled = true; };
+  }, [selectedRepoId]);
+
   const handleStatusChange = async (status: IssueStatus) => {
     if (!issue) return;
     const updated = await updateIssueStatus(issue.id, status);
     setIssue(updated.issue);
+  };
+
+  /**
+   * Patches the loaded issue's own githubIssueLinks after a successful
+   * create (bugfix: duplicate GitHub issues) — so re-opening the modal
+   * without a full page reload still sees the just-created link via the
+   * same server-persisted state a refresh would show, rather than only
+   * CreateGitHubIssueButton's own local result state.
+   */
+  const handleGitHubIssueLinked = (link: GitHubIssueLink) => {
+    setIssue((prev) => {
+      if (!prev) return prev;
+      const withoutThisRepo = (prev.githubIssueLinks ?? []).filter((l) => !(l.repositoryId === link.repositoryId && l.provider === link.provider));
+      return { ...prev, githubIssueLinks: [...withoutThisRepo, link] };
+    });
   };
 
   const handleAsk = async (question?: string) => {
@@ -164,19 +215,23 @@ export function IssueDetailPage() {
     if (!issue || !selectedRepoId || aiFixLoading) return;
     setAiFixLoading(true);
     setAiFixError(null);
+    setAiFixDiagnostic(null);
     setAiFixProposal(null);
     setAiFixDecision(null);
     setReviewResponse(null);
     setReviewError(null);
+    setReviewSyntaxError(null);
     setConfirmingPr(false);
     setPrResult(null);
     setPrError(null);
+    setPrAdminApprovalRequired(false);
     try {
       const proposal = await proposeRepositoryFindingFix(selectedRepoId, issue.id, aiFixInstruction.trim() || undefined);
       setAiFixProposal(proposal);
       lensEvent.success('Fix proposal generated successfully.');
     } catch (err) {
       setAiFixError(err instanceof Error ? err.message : 'Failed to generate a fix proposal');
+      setAiFixDiagnostic(err instanceof ApiRequestError ? err.diagnostic ?? null : null);
     } finally {
       setAiFixLoading(false);
     }
@@ -187,6 +242,7 @@ export function IssueDetailPage() {
     setAiFixDecision('approved');
     setReviewLoading(true);
     setReviewError(null);
+    setReviewSyntaxError(null);
     setReviewResponse(null);
     setPrResult(null);
     setPrError(null);
@@ -195,6 +251,7 @@ export function IssueDetailPage() {
       setReviewResponse(review);
     } catch (err) {
       setReviewError(err instanceof Error ? err.message : 'Failed to prepare the fix for review');
+      setReviewSyntaxError(err instanceof ApiRequestError ? err.syntaxError ?? null : null);
     } finally {
       setReviewLoading(false);
     }
@@ -205,6 +262,7 @@ export function IssueDetailPage() {
     setConfirmingPr(false);
     setPrLoading(true);
     setPrError(null);
+    setPrAdminApprovalRequired(false);
     try {
       const result = await approveRepositoryFindingFix(selectedRepoId, issue.id, reviewResponse.applicationId, aiFixProposal);
       setPrResult(result);
@@ -214,7 +272,12 @@ export function IssueDetailPage() {
         icon: <PullRequestIcon />,
       });
     } catch (err) {
-      setPrError(err instanceof ApiRequestError ? err.message : err instanceof Error ? err.message : 'Failed to create the pull request');
+      if (err instanceof ApiRequestError && err.code === 'ADMIN_APPROVAL_REQUIRED') {
+        setPrAdminApprovalRequired(true);
+        setPrError(err.message);
+      } else {
+        setPrError(err instanceof ApiRequestError ? err.message : err instanceof Error ? err.message : 'Failed to create the pull request');
+      }
     } finally {
       setPrLoading(false);
     }
@@ -306,6 +369,11 @@ export function IssueDetailPage() {
         onExport={handleExportIssue}
         onStatusChange={handleStatusChange}
         actionMessage={actionMessage}
+        repositories={repositories}
+        selectedRepoId={selectedRepoId}
+        setSelectedRepoId={setSelectedRepoId}
+        reloadRepositories={loadRepositories}
+        onGitHubIssueLinked={handleGitHubIssueLinked}
       />
 
       <div className="issue-detail-layout">
@@ -351,6 +419,7 @@ export function IssueDetailPage() {
             setAiFixInstruction={setAiFixInstruction}
             aiFixLoading={aiFixLoading}
             aiFixError={aiFixError}
+            aiFixDiagnostic={aiFixDiagnostic}
             aiFixProposal={aiFixProposal}
             aiFixDecision={aiFixDecision}
             onProposeAiFix={handleProposeAiFix}
@@ -358,12 +427,15 @@ export function IssueDetailPage() {
             onRejectProposal={() => setAiFixDecision('rejected')}
             reviewLoading={reviewLoading}
             reviewError={reviewError}
+            reviewSyntaxError={reviewSyntaxError}
             reviewResponse={reviewResponse}
             confirmingPr={confirmingPr}
             setConfirmingPr={setConfirmingPr}
             prLoading={prLoading}
             prError={prError}
+            prAdminApprovalRequired={prAdminApprovalRequired}
             prResult={prResult}
+            prStrategyPreview={prStrategyPreview}
             onCreatePr={handleCreatePr}
           />
         </div>

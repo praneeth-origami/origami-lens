@@ -1,12 +1,17 @@
 import type {
   Repository,
   RepositoryFixApproveResponse,
+  RepositoryFixGroundingDiagnostic,
   RepositoryFixProposalResponse,
+  RepositoryFixRevisionMismatchDiagnostic,
   RepositoryFixReviewResponse,
+  RepositoryFixSyntaxErrorDetail,
+  RepositoryPrStrategyPreviewResponse,
   RepositoryResolution,
 } from '@origami/contracts';
-import { REPOSITORY_ROLE_LABEL } from '../api/client';
+import { githubPushConnectUrl, REPOSITORY_ROLE_LABEL } from '../api/client';
 import { CodeBracketIcon } from './icons';
+import { PrStrategyBadge } from './PrStrategyBadge';
 
 /** Phase 13 — GitLab calls the same concept a "Merge Request"; every other supported provider (GitHub, Bitbucket) calls it a "Pull Request". Purely a display-label choice — the underlying generic RepositoryFixApproveResponse is unchanged. */
 function prRequestLabel(provider: string): string {
@@ -31,6 +36,8 @@ interface Props {
   setAiFixInstruction: (value: string) => void;
   aiFixLoading: boolean;
   aiFixError: string | null;
+  /** Set only when aiFixError's failure was PROPOSAL_UNGROUNDED or SOURCE_REVISION_MISMATCH — hashes/metadata only (never raw source). */
+  aiFixDiagnostic: RepositoryFixGroundingDiagnostic | RepositoryFixRevisionMismatchDiagnostic | null;
   aiFixProposal: RepositoryFixProposalResponse | null;
   aiFixDecision: 'approved' | 'rejected' | null;
   onProposeAiFix: () => void;
@@ -38,12 +45,18 @@ interface Props {
   onRejectProposal: () => void;
   reviewLoading: boolean;
   reviewError: string | null;
+  /** Set only when reviewError's failure was SYNTAX_VALIDATION_FAILED — the real parser's file/line/column/message. */
+  reviewSyntaxError: RepositoryFixSyntaxErrorDetail | null;
   reviewResponse: RepositoryFixReviewResponse | null;
   confirmingPr: boolean;
   setConfirmingPr: (value: boolean) => void;
   prLoading: boolean;
   prError: string | null;
+  /** True only when approval failed with the ADMIN_APPROVAL_REQUIRED error code — rendered as an explanatory state (with a connect link), not a generic error. */
+  prAdminApprovalRequired: boolean;
   prResult: RepositoryFixApproveResponse | null;
+  /** Read-only preview of which PR method WOULD be used, resolved for the selected repository — null while loading/unavailable (no badge shown). */
+  prStrategyPreview: RepositoryPrStrategyPreviewResponse | null;
   onCreatePr: () => void;
 }
 
@@ -63,6 +76,7 @@ export function IssueFixWithAi({
   setAiFixInstruction,
   aiFixLoading,
   aiFixError,
+  aiFixDiagnostic,
   aiFixProposal,
   aiFixDecision,
   onProposeAiFix,
@@ -70,12 +84,15 @@ export function IssueFixWithAi({
   onRejectProposal,
   reviewLoading,
   reviewError,
+  reviewSyntaxError,
   reviewResponse,
   confirmingPr,
   setConfirmingPr,
   prLoading,
   prError,
+  prAdminApprovalRequired,
   prResult,
+  prStrategyPreview,
   onCreatePr,
 }: Props) {
   return (
@@ -123,7 +140,57 @@ export function IssueFixWithAi({
       {resolution?.status !== 'resolved' && !selectedRepoId && repositories.length > 0 && <p className="muted">Choose a connected repository above first.</p>}
       {repositories.length === 0 && <p className="muted">No connected repositories — connect one from the Repositories page first.</p>}
 
-      {aiFixError && <p className="connect-repo-error" role="alert">{aiFixError}</p>}
+      {aiFixError && (
+        <div>
+          <p className="connect-repo-error" role="alert">{aiFixError}</p>
+          {aiFixDiagnostic && (
+            <div className="fix-validation-error" role="alert">
+              <p className="detail-action-message">
+                {'hunkIndex' in aiFixDiagnostic ? 'Proposal rejected — ungrounded' : 'Proposal rejected — revision mismatch'}
+              </p>
+              {'hunkIndex' in aiFixDiagnostic ? (
+                <>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">File</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.filePath}</p>
+                  </div>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">Commit</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.commitSha}</p>
+                  </div>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">Hunk</span>
+                    <p>{aiFixDiagnostic.hunkIndex + 1} (reported lines {aiFixDiagnostic.reportedStartLine}-{aiFixDiagnostic.reportedEndLine})</p>
+                  </div>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">oldText hash</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.oldTextHash}</p>
+                  </div>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">Indexed content hash</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.indexedContentHash}</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">File</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.filePath ?? '(unknown)'}</p>
+                  </div>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">Expected commit</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.expectedCommitSha}</p>
+                  </div>
+                  <div className="repository-ask-answer">
+                    <span className="repository-meta-label">Indexed commit</span>
+                    <p className="repository-commit-sha">{aiFixDiagnostic.indexedCommitSha}</p>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {aiFixLoading && (
         <div className="repository-clone-progress">
@@ -150,6 +217,32 @@ export function IssueFixWithAi({
                 <span className="repository-meta-label">Reasoning</span>
                 <p>{aiFixProposal.reasoning}</p>
               </div>
+
+              {aiFixProposal.sourceGrounding && (
+                <div className={`fix-source-grounding fix-source-grounding-${aiFixProposal.sourceGrounding.confidence.toLowerCase()}`}>
+                  <div className="fix-source-grounding-header">
+                    <span className="repository-meta-label">Source match confidence</span>
+                    <span className={`badge fix-confidence-badge fix-confidence-${aiFixProposal.sourceGrounding.confidence.toLowerCase()}`}>
+                      {aiFixProposal.sourceGrounding.confidence === 'LOW' && '⚠ '}
+                      {aiFixProposal.sourceGrounding.confidence.charAt(0) + aiFixProposal.sourceGrounding.confidence.slice(1).toLowerCase()}
+                    </span>
+                  </div>
+                  {aiFixProposal.sourceGrounding.matchedEvidence.length > 0 && (
+                    <p className="fix-source-grounding-evidence">
+                      Evidence matched:{' '}
+                      {aiFixProposal.sourceGrounding.matchedEvidence.map((token) => (
+                        <span key={token} className="fix-evidence-chip">✓ {token}</span>
+                      ))}
+                    </p>
+                  )}
+                  {aiFixProposal.sourceGrounding.note && (
+                    <p className="muted fix-source-grounding-note">
+                      {aiFixProposal.sourceGrounding.confidence === 'LOW' ? 'Origami Lens found a possible source file, but could not strongly associate it with the scanned DOM element. ' : ''}
+                      {aiFixProposal.sourceGrounding.note}
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div className="repository-ask-sources">
                 <span className="repository-meta-label">Files Changed</span>
@@ -202,7 +295,29 @@ export function IssueFixWithAi({
                   <p className="muted">Applying the change to an isolated copy of the repository…</p>
                 </div>
               ) : reviewError ? (
-                <p className="connect-repo-error" role="alert">{reviewError}</p>
+                reviewSyntaxError ? (
+                  <div className="fix-validation-error" role="alert">
+                    <p className="detail-action-message">Fix validation failed</p>
+                    <div className="repository-ask-answer">
+                      <span className="repository-meta-label">File</span>
+                      <p className="repository-commit-sha">{reviewSyntaxError.filePath}</p>
+                    </div>
+                    <div className="repository-ask-answer">
+                      <span className="repository-meta-label">Validation</span>
+                      <p>{reviewSyntaxError.validationType}</p>
+                    </div>
+                    <div className="repository-ask-answer">
+                      <span className="repository-meta-label">Line</span>
+                      <p>{reviewSyntaxError.line}, Column {reviewSyntaxError.column}</p>
+                    </div>
+                    <div className="repository-ask-answer">
+                      <span className="repository-meta-label">Error</span>
+                      <p>{reviewSyntaxError.message}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="connect-repo-error" role="alert">{reviewError}</p>
+                )
               ) : reviewResponse ? (
                 <div className="repository-discovery">
                   <p className="detail-action-message">Fix ready for review</p>
@@ -242,17 +357,23 @@ export function IssueFixWithAi({
                   </div>
 
                   {!confirmingPr && !prLoading && !prResult && !prError && (
-                    <div className="ai-actions">
+                    <div className="ai-actions pr-strategy-actions-row">
+                      {prStrategyPreview && <PrStrategyBadge strategy={prStrategyPreview.strategy} />}
                       <button type="button" className="primary-button" onClick={() => setConfirmingPr(true)}>Create Pull Request</button>
                     </div>
                   )}
 
                   {confirmingPr && (
                     <div className="repository-discovery">
+                      {prStrategyPreview && (
+                        <p className="muted">
+                          <PrStrategyBadge strategy={prStrategyPreview.strategy} /> — {prStrategyPreview.detail}
+                        </p>
+                      )}
                       <p>Create a branch, commit the reviewed changes, push it to the repository, and open a Pull Request?</p>
                       <div className="ai-actions">
                         <button type="button" className="ghost-button" onClick={() => setConfirmingPr(false)}>Cancel</button>
-                        <button type="button" className="primary-button" onClick={onCreatePr}>Create Pull Request</button>
+                        <button type="button" className="primary-button" onClick={onCreatePr} disabled={prStrategyPreview?.strategy === 'ADMIN_APPROVAL_REQUIRED'}>Create Pull Request</button>
                       </div>
                     </div>
                   )}
@@ -264,11 +385,27 @@ export function IssueFixWithAi({
                     </div>
                   )}
 
-                  {prError && <p className="connect-repo-error" role="alert">{prError}</p>}
+                  {prError && prAdminApprovalRequired ? (
+                    <div className="repository-discovery admin-approval-required-notice">
+                      <p className="detail-action-message"><PrStrategyBadge strategy="ADMIN_APPROVAL_REQUIRED" /></p>
+                      <p className="muted">{prError}</p>
+                      <div className="ai-actions">
+                        <a className="primary-button" href={githubPushConnectUrl()}>Connect GitHub for direct access</a>
+                      </div>
+                    </div>
+                  ) : (
+                    prError && <p className="connect-repo-error" role="alert">{prError}</p>
+                  )}
 
                   {prResult && (
                     <div className="repository-discovery">
                       <p className="detail-action-message">{prRequestLabel(prResult.provider)} created</p>
+                      {prResult.prStrategy && (
+                        <div className="repository-ask-answer">
+                          <span className="repository-meta-label">Method</span>
+                          <p><PrStrategyBadge strategy={prResult.prStrategy} /></p>
+                        </div>
+                      )}
                       <div className="repository-ask-answer">
                         <span className="repository-meta-label">Branch</span>
                         <p className="repository-commit-sha">{prResult.branchName}</p>

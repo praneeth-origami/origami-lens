@@ -55,11 +55,53 @@ export interface ExtractedImport {
   endLine: number;
 }
 
+export interface SyntaxErrorLocation {
+  /** 1-based, matching editor/compiler convention (Tree-sitter's own startPosition.row is 0-based). */
+  line: number;
+  /** 1-based. */
+  column: number;
+  /** Best-effort description derived from Tree-sitter's own error-recovery node — a MISSING node names the token the grammar expected; an ERROR node quotes the unparseable text it could not fit anywhere in the grammar. Never a fabricated compiler-style message the grammar didn't actually produce. */
+  message: string;
+}
+
 export interface FileAstResult {
   symbols: ExtractedSymbol[];
   imports: ExtractedImport[];
   /** True if Tree-sitter's error-recovery kicked in anywhere in the file — the file is still processed (see the module comment on malformed source), this is informational only. */
   hasSyntaxError: boolean;
+  /** The first (leftmost, in document order) location Tree-sitter's error-recovery had to work around — set only when hasSyntaxError is true. */
+  syntaxErrorLocation?: SyntaxErrorLocation;
+}
+
+/**
+ * First (leftmost, pre-order) node where Tree-sitter's error-recovery
+ * kicked in — either a dedicated ERROR node (a span the grammar could not
+ * fit anywhere) or a MISSING node (a token, e.g. a closing tag/bracket,
+ * the grammar had to assume was there). Deliberately a single manual walk
+ * rather than `descendantsOfType('ERROR')`: that API only matches types
+ * the grammar itself registers, and ERROR is a synthetic Tree-sitter type
+ * no grammar registers — verified empirically to always return zero
+ * results for a real ERROR node in this project's web-tree-sitter version.
+ */
+function findFirstSyntaxErrorNode(node: SyntaxNode): SyntaxNode | null {
+  if (node.type === 'ERROR' || node.isMissing()) return node;
+  for (const child of node.children) {
+    const found = findFirstSyntaxErrorNode(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+function describeSyntaxErrorNode(node: SyntaxNode): string {
+  if (node.isMissing()) return `Missing "${node.type}"`;
+  const snippet = node.text.replace(/\s+/g, ' ').trim().slice(0, 40);
+  return snippet ? `Unexpected token near "${snippet}"` : 'Unexpected syntax error';
+}
+
+function findFirstSyntaxErrorLocation(root: SyntaxNode): SyntaxErrorLocation | null {
+  const best = findFirstSyntaxErrorNode(root);
+  if (!best) return null;
+  return { line: best.startPosition.row + 1, column: best.startPosition.column + 1, message: describeSyntaxErrorNode(best) };
 }
 
 interface LangConfig {
@@ -372,10 +414,12 @@ export async function parseAndExtract(language: DetectedLanguage, source: string
       }
     }
 
+    const hasSyntaxError = tree.rootNode.hasError();
     return {
       symbols,
       imports: extractImports(tree.rootNode, config),
-      hasSyntaxError: tree.rootNode.hasError(),
+      hasSyntaxError,
+      syntaxErrorLocation: hasSyntaxError ? findFirstSyntaxErrorLocation(tree.rootNode) ?? undefined : undefined,
     };
   } finally {
     parser.delete();

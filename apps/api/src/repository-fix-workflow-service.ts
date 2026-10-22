@@ -4,8 +4,10 @@ import type {
   Repository,
   RepositoryFixApproveResponse,
   RepositoryFixPrProvider,
+  RepositoryFixPrStrategy,
   RepositoryFixProposalResponse,
   RepositoryFixReviewResponse,
+  RepositoryFixSyntaxErrorDetail,
   RepositoryFixWorkflowErrorCode,
 } from '@origami/contracts';
 import { applyFindingFix, FixApplicationError, type FixApplicationStores } from './repository-fix-application-service.js';
@@ -16,6 +18,7 @@ import { canAccessRepository, parseRepositoryUrl } from './repository-service.js
 import { isSensitiveFile } from './repository-file-safety.js';
 import {
   GitWorkflowError,
+  addRemote,
   branchExistsOnRemote,
   commitStaged,
   createBranch,
@@ -25,13 +28,13 @@ import {
   pushBranch,
   stageFiles,
 } from './repository-git.js';
-import type { RepositoryProviderClient } from './repository-provider-client.js';
+import type { PushCredentials, RepositoryProviderClient } from './repository-provider-client.js';
 import { RepositoryProviderError } from './repository-provider-client.js';
 import type { UnifiedRepositoryFixWorkflowStore } from './unified-repository-fix-workflow-store.js';
 import type { RepositoryFixWorkflowRecord } from './db/repository-fix-workflow-repository.js';
 
 export class FixWorkflowError extends Error {
-  constructor(message: string, public readonly code: RepositoryFixWorkflowErrorCode) {
+  constructor(message: string, public readonly code: RepositoryFixWorkflowErrorCode, public readonly syntaxError?: RepositoryFixSyntaxErrorDetail) {
     super(message);
     this.name = 'FixWorkflowError';
   }
@@ -144,7 +147,7 @@ export async function reviewFindingFix(
       { retain: true, applicationId },
     );
   } catch (error) {
-    if (error instanceof FixApplicationError) throw new FixWorkflowError(error.message, error.code);
+    if (error instanceof FixApplicationError) throw new FixWorkflowError(error.message, error.code, error.syntaxError);
     throw error;
   }
 
@@ -219,7 +222,8 @@ function buildPrBody(finding: Issue, workflow: RepositoryFixWorkflowRecord): str
   ].join('\n');
 }
 
-function toApproveResponse(workflow: RepositoryFixWorkflowRecord, fallbackProvider: RepositoryFixPrProvider): RepositoryFixApproveResponse {
+/** `prStrategy` is not persisted (no schema change) — only ever known for the fresh, just-executed approval; the idempotent-replay path (a second /approve call for an already-PR_OPENED workflow) omits it, which the frontend already treats as "provider default" rather than an error. */
+function toApproveResponse(workflow: RepositoryFixWorkflowRecord, fallbackProvider: RepositoryFixPrProvider, prStrategy?: RepositoryFixPrStrategy): RepositoryFixApproveResponse {
   return {
     applicationId: workflow.id,
     repositoryId: workflow.repositoryId,
@@ -231,6 +235,7 @@ function toApproveResponse(workflow: RepositoryFixWorkflowRecord, fallbackProvid
     provider: workflow.provider ?? fallbackProvider,
     prNumber: workflow.prNumber,
     prUrl: workflow.prUrl,
+    prStrategy,
   };
 }
 
@@ -341,22 +346,70 @@ export async function approveFindingFix(
     // per-user connection row. `callerUserId` falls back to `ownerId` only
     // for callers that never distinguished the two (see FixWorkflowParams).
     const credentialUserId = params.callerUserId ?? params.ownerId;
-    let pushCredentials;
-    try {
-      // Safe: validateRepositoryForWorkflow above already proved params.ownerId is a real, defined string, and credentialUserId falls back to it — it cannot be undefined here.
-      pushCredentials = await provider.getPushCredentials(credentialUserId!, owner, name, signal);
-    } catch (error) {
-      if (error instanceof RepositoryProviderError) return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
-      return await fail('GIT_AUTH_NOT_CONFIGURED', `${provider.provider} authentication is not configured.`);
+    let pushCredentials: PushCredentials;
+    // Only ever set by GitHubProviderClient's resolvePrStrategy (GitLab/
+    // Bitbucket have no such optional capability — see
+    // RepositoryProviderClient.resolvePrStrategy's doc comment). Determines
+    // which of the branches below run: GITHUB_APP_DIRECT behaves exactly as
+    // before (the old validateRemoteAccess/getRepositoryInfo calls still
+    // run); USER_DIRECT/USER_FORK skip those (resolvePrStrategy's own
+    // GET /repos already proved access AND returned the default branch
+    // using the correct — non-App — credential) and additionally carry a
+    // fork remote/owner for USER_FORK.
+    let prStrategy: RepositoryFixPrStrategy | undefined;
+    let forkRemoteUrl: string | undefined;
+    let forkOwner: string | undefined;
+    let resolvedDefaultBranch: string | undefined;
+
+    if (provider.resolvePrStrategy) {
+      let resolved;
+      try {
+        // Safe: validateRepositoryForWorkflow above already proved params.ownerId is a real, defined string, and credentialUserId falls back to it — it cannot be undefined here.
+        resolved = await provider.resolvePrStrategy(credentialUserId!, owner, name, signal);
+      } catch (error) {
+        if (error instanceof RepositoryProviderError && error.category === 'FORK_NOT_READY') return await fail('FORK_NOT_READY', error.message);
+        if (error instanceof RepositoryProviderError) return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
+        return await fail('GIT_AUTH_NOT_CONFIGURED', `${provider.provider} authentication is not configured.`);
+      }
+      if (resolved.strategy === 'ADMIN_APPROVAL_REQUIRED') return await fail('ADMIN_APPROVAL_REQUIRED', resolved.detail);
+      prStrategy = resolved.strategy;
+      pushCredentials = resolved.pushCredentials!;
+      forkOwner = resolved.forkOwner;
+      forkRemoteUrl = resolved.forkCloneUrl;
+      resolvedDefaultBranch = resolved.defaultBranch;
+    } else {
+      try {
+        pushCredentials = await provider.getPushCredentials(credentialUserId!, owner, name, signal);
+      } catch (error) {
+        if (error instanceof RepositoryProviderError) return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
+        return await fail('GIT_AUTH_NOT_CONFIGURED', `${provider.provider} authentication is not configured.`);
+      }
     }
 
-    try {
-      await provider.validateRemoteAccess(credentialUserId!, owner, name, signal);
-    } catch (error) {
-      if (error instanceof RepositoryProviderError && (error.category === 'AUTH_NOT_CONFIGURED' || error.category === 'AUTH_FAILED')) {
-        return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
+    // GITHUB_APP_DIRECT (or any provider without resolvePrStrategy) still
+    // runs the exact original access check; USER_DIRECT/USER_FORK skip it —
+    // resolvePrStrategy already confirmed access with the RIGHT credential
+    // (the App's validateRemoteAccess would incorrectly try an App token
+    // that may not cover this repo at all).
+    if (prStrategy !== 'USER_DIRECT' && prStrategy !== 'USER_FORK') {
+      try {
+        await provider.validateRemoteAccess(credentialUserId!, owner, name, signal);
+      } catch (error) {
+        if (error instanceof RepositoryProviderError && (error.category === 'AUTH_NOT_CONFIGURED' || error.category === 'AUTH_FAILED')) {
+          return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
+        }
+        return await fail('GIT_REMOTE_UNAVAILABLE', error instanceof Error ? error.message : 'Failed to reach the repository provider.');
       }
-      return await fail('GIT_REMOTE_UNAVAILABLE', error instanceof Error ? error.message : 'Failed to reach the repository provider.');
+    }
+
+    let forkRemoteName: string | undefined;
+    if (prStrategy === 'USER_FORK' && forkRemoteUrl) {
+      try {
+        await addRemote(workflow.workspaceDir, 'fork', forkRemoteUrl, signal);
+        forkRemoteName = 'fork';
+      } catch (error) {
+        return await fail('GIT_REMOTE_UNAVAILABLE', error instanceof Error ? error.message : 'Failed to add the fork remote.');
+      }
     }
 
     assertNotAborted(signal);
@@ -385,16 +438,30 @@ export async function approveFindingFix(
 
     assertNotAborted(signal);
 
+    // resolvedDefaultBranch (from resolvePrStrategy's own GET /repos, using
+    // the correct non-App credential) takes priority over the origin-remote
+    // ls-remote fallback below when set — both ultimately describe the same
+    // ORIGINAL repository's default branch regardless of strategy, so
+    // `origin` (never the fork remote) is always the right remote to ask here.
     let baseBranch: string | undefined = repository.branch;
     if (!baseBranch) {
-      baseBranch = await getRemoteDefaultBranch(workflow.workspaceDir, signal, pushCredentials);
+      baseBranch = resolvedDefaultBranch ?? (await getRemoteDefaultBranch(workflow.workspaceDir, signal, pushCredentials));
     }
     if (!baseBranch) {
-      try {
-        const info = await provider.getRepositoryInfo(credentialUserId!, owner, name, signal);
-        baseBranch = info.defaultBranch;
-      } catch {
+      if (prStrategy === 'USER_DIRECT' || prStrategy === 'USER_FORK') {
+        // getRepositoryInfo would incorrectly resolve an App credential that
+        // may not cover this repo at all — resolvePrStrategy already tried
+        // to supply resolvedDefaultBranch above, so reaching here means
+        // GitHub genuinely didn't report one; 'main' matches this file's
+        // existing fallback convention (see DEFAULT_BRANCH in repository-service.ts).
         baseBranch = 'main';
+      } else {
+        try {
+          const info = await provider.getRepositoryInfo(credentialUserId!, owner, name, signal);
+          baseBranch = info.defaultBranch;
+        } catch {
+          baseBranch = 'main';
+        }
       }
     }
 
@@ -404,7 +471,10 @@ export async function approveFindingFix(
       const candidate = attempt === 1 ? branchName : buildFixBranchName(finding.id, finding.title, attempt);
       let existsRemotely: boolean;
       try {
-        existsRemotely = await branchExistsOnRemote(workflow.workspaceDir, candidate, signal, pushCredentials);
+        // Checked against the ACTUAL push destination (the fork remote for
+        // USER_FORK, origin otherwise) — a name that's free on origin but
+        // already taken on the fork would still collide once pushed.
+        existsRemotely = await branchExistsOnRemote(workflow.workspaceDir, candidate, signal, pushCredentials, forkRemoteName ?? 'origin');
       } catch (error) {
         return await fail('GIT_REMOTE_UNAVAILABLE', error instanceof Error ? error.message : 'Failed to check for a colliding branch on the remote.');
       }
@@ -439,7 +509,8 @@ export async function approveFindingFix(
     assertNotAborted(signal);
 
     try {
-      await pushBranch(workflow.workspaceDir, branchName, pushCredentials.token, signal, pushCredentials.username);
+      // Pushed to the fork remote for USER_FORK, origin (unchanged) otherwise.
+      await pushBranch(workflow.workspaceDir, branchName, pushCredentials.token, signal, pushCredentials.username, forkRemoteName ?? 'origin');
     } catch (error) {
       if (error instanceof GitWorkflowError && error.cause === 'auth_failed') return await fail('GIT_AUTH_NOT_CONFIGURED', error.message);
       return await fail('GIT_PUSH_FAILED', error instanceof Error ? error.message : 'Failed to push the fix branch.');
@@ -453,7 +524,15 @@ export async function approveFindingFix(
     try {
       pr = await provider.createPullRequest(
         credentialUserId!,
-        { owner, repo: name, title: buildPrTitle(finding), body: buildPrBody(finding, updatedWorkflow), head: branchName, base: baseBranch },
+        {
+          owner, repo: name, title: buildPrTitle(finding), body: buildPrBody(finding, updatedWorkflow), head: branchName, base: baseBranch,
+          // headOwner/authToken are no-ops for GITHUB_APP_DIRECT (undefined)
+          // and for GitLab/Bitbucket (ignored) — only USER_FORK/USER_DIRECT
+          // set them, so the PR is opened with the right credential and
+          // (for a fork) the right cross-repo `head` qualifier.
+          headOwner: forkOwner,
+          authToken: prStrategy === 'USER_DIRECT' || prStrategy === 'USER_FORK' ? pushCredentials.token : undefined,
+        },
         signal,
       );
     } catch (error) {
@@ -481,6 +560,7 @@ export async function approveFindingFix(
       provider: repository.provider,
       prNumber: pr.number,
       prUrl: pr.url,
+      prStrategy,
     };
   } catch (error) {
     if (error instanceof FixWorkflowError) throw error;

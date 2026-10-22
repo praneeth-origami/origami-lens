@@ -22,4 +22,6 @@ export const EMAIL_SUBJECTS = {
   billingPaymentFailed: 'Action needed: your Origami Lens payment failed',
   billingPlanLimitReached: 'You have reached your plan limit',
   billingSubscriptionCancelled: 'Your Origami Lens subscription was cancelled',
+  leadSubmitted: (name: string) => `New Origami Lens lead: ${name}`,
+  monitoringRegressionDetected: (siteName: string) => `Regression detected on ${siteName}`,
 } as const;

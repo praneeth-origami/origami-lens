@@ -66,7 +66,7 @@ export class ScanPipeline {
       organizationId,
     };
 
-    this.store.saveScan(response);
+    this.store.saveScan(response, result.evidence);
     return response;
   }
 

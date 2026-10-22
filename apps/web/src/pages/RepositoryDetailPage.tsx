@@ -27,6 +27,7 @@ import {
 import { HealthBanner } from '../components/HealthBanner';
 import { ErrorState, LoadingSkeleton } from '../components/StateViews';
 import { AnimatedProgressBar } from '../components/AnimatedProgressBar';
+import { RepoPrStrategyBadge } from '../components/RepoPrStrategyBadge';
 import {
   GitHubIcon,
   GitLabIcon,
@@ -53,7 +54,7 @@ import {
 import { lensEvent } from '../notifications/lens-event';
 import { confirm } from '../notifications/confirm';
 import { useWorkspaceRole } from '../hooks/useWorkspaceRole';
-import { canConfigureRepository, canRunScanOrAI } from '../utils/workspace-permissions';
+import { canConfigureRepository, canRunScanOrAI, canMutateRepository } from '../utils/workspace-permissions';
 
 const PROVIDER_LABEL: Record<Repository['provider'], string> = { GITHUB: 'GitHub', GITLAB: 'GitLab', BITBUCKET: 'Bitbucket' };
 const PROVIDER_ICON: Record<Repository['provider'], ComponentType> = { GITHUB: GitHubIcon, GITLAB: GitLabIcon, BITBUCKET: BitbucketIcon };
@@ -771,6 +772,7 @@ export function RepositoryDetailPage() {
                 <span className="repo-status-dot" aria-hidden="true" />
                 {STATUS_META[repository.status].label}
               </span>
+              <RepoPrStrategyBadge repositoryId={repository.id} enabled={canMutateRepository(role)} />
             </div>
           </div>
         </div>

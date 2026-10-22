@@ -101,6 +101,7 @@ export class WebsiteScanOrchestrator {
           status: 'COMPLETED',
           healthScore: result.healthScore,
           evidenceSummary: result.evidenceSummary,
+          fullEvidence: result.evidence,
           artifacts: result.artifacts.screenshots.length > 0 ? result.artifacts : undefined,
           scannedAt,
         });
@@ -175,6 +176,7 @@ export async function createWebsiteScanRecord(
   options: WebsiteScanOptions,
   ownerId?: string,
   organizationId?: string,
+  monitoredSiteId?: string,
 ): Promise<string> {
   const scanId = randomUUID();
   const resolved = resolveWebsiteOptions(options);
@@ -188,6 +190,7 @@ export async function createWebsiteScanRecord(
     discoveryMethod: resolved.discoveryMethod,
     maxPages: resolved.maxPages,
     status: 'QUEUED',
+    monitoredSiteId,
   });
 
   return scanId;

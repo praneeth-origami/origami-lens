@@ -37,6 +37,8 @@ export interface WorkspaceMemberServiceDeps {
   userRepo: { findByEmail(email: string): Promise<AuthUser | undefined>; getById(id: string): Promise<AuthUser | undefined> };
   organizationRepo: WorkspaceMemberOrganizationRepo;
   getPlan(organizationId: string): Promise<SubscriptionPlan>;
+  /** Agency plan (V4) hard seat cap — see EntitlementService.checkSeatCapacity. Always {allowed: true} for every plan except Agency. */
+  checkSeatCapacity(organizationId: string): Promise<{ allowed: boolean; limit: number | null; used: number }>;
   auditLog: { record(input: RecordAuditEventInput): Promise<void> };
   /** Best-effort notifications — a delivery failure never blocks the membership change itself (same contract as workspace-invitation-service.ts's sendInvitationEmailBestEffort). */
   sendWorkspaceMemberAddedEmail(to: string, data: { workspaceName: string; role: OrganizationRole; webAppBaseUrl: string }): Promise<void>;
@@ -87,6 +89,13 @@ export async function addWorkspaceMemberByEmail(
   const existingRole = await deps.organizationRepo.getMembershipRole(organizationId, user.id);
   if (existingRole) {
     throw new WorkspaceMemberError('This person is already a member of this workspace.', 'MEMBER_ALREADY_EXISTS');
+  }
+
+  if (role !== 'CLIENT_VIEWER') {
+    const capacity = await deps.checkSeatCapacity(organizationId);
+    if (!capacity.allowed) {
+      throw new WorkspaceMemberError(`This workspace has reached its limit of ${capacity.limit} internal team members.`, 'SEAT_LIMIT_REACHED');
+    }
   }
 
   await deps.organizationRepo.addMember(organizationId, user.id, role);

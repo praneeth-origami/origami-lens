@@ -1,4 +1,13 @@
-import type { Issue, RepositoryFixProposalErrorCode, RepositoryFixProposalFileChange, RepositoryFixProposalHunk, RepositoryFixProposalSource } from '@origami/contracts';
+import type {
+  Issue,
+  RepositoryFixGroundingDiagnostic,
+  RepositoryFixProposalErrorCode,
+  RepositoryFixProposalFileChange,
+  RepositoryFixProposalHunk,
+  RepositoryFixProposalSource,
+  RepositoryFixRevisionMismatchDiagnostic,
+  RepositoryFixSourceGrounding,
+} from '@origami/contracts';
 import { SearchError, searchRepository, type RepositorySearchStores, type SearchProviderDeps } from './repository-search-service.js';
 import { buildFindingFixContext, buildFindingSearchQuery, summarizeFindingEvidence, type FindingSummary } from './repository-fix-context.js';
 import { isSensitiveFile } from './repository-file-safety.js';
@@ -7,6 +16,9 @@ import { FindingFixProviderError, type FindingFixProvider, type FindingFixProvid
 import type { UnifiedRepositoryIndexStore } from './unified-repository-index-store.js';
 import type { InsertCodeChunkInput, InsertIndexFileInput } from './db/repository-index-repository.js';
 import { normalizeLineEndings } from './repository-fix-validation.js';
+import { computeContentHash } from './repository-chunker.js';
+import { extractEvidenceTokens } from './repository-finding-evidence.js';
+import { correlateEvidenceWithText, deriveFixSourceGrounding } from './repository-finding-evidence-scoring.js';
 
 function envInt(name: string, defaultValue: number, minValue = 1): number {
   const raw = process.env[name];
@@ -29,10 +41,54 @@ export const AI_FINDING_FIX_MAX_RESULT_CHUNKS = envInt('AI_FINDING_FIX_MAX_RESUL
 const MAX_FINDING_DESCRIPTION_CHARS = 1_500;
 
 export class FindingFixError extends Error {
-  constructor(message: string, public readonly code: RepositoryFixProposalErrorCode) {
+  constructor(
+    message: string,
+    public readonly code: RepositoryFixProposalErrorCode,
+    /** Safe-to-display diagnostic (hashes only, never raw source) — set only for PROPOSAL_UNGROUNDED or SOURCE_REVISION_MISMATCH. */
+    public readonly diagnostic?: RepositoryFixGroundingDiagnostic | RepositoryFixRevisionMismatchDiagnostic,
+  ) {
     super(message);
     this.name = 'FindingFixError';
   }
+}
+
+/**
+ * CHECK 1 (source-revision consistency): defense-in-depth against the
+ * exact failure class an ungrounded-oldText rejection could otherwise be
+ * silently caused by — retrieval/embedding referring to one commit while
+ * the file/chunk rows actually used to build context and validate the
+ * proposal came from a DIFFERENT one (e.g. a stale indexJobId cached on
+ * an embedding job, or a store returning rows from a different job for
+ * the same repository). `getLatestForCommitAsync` is already queried BY
+ * `expectedCommitSha`, so under correct operation every row it returns
+ * necessarily agrees — this asserts that invariant explicitly rather than
+ * assuming it, so a future store-layer bug fails loudly here instead of
+ * silently producing a spurious PROPOSAL_UNGROUNDED rejection somewhere
+ * downstream with no way to tell the two failure modes apart.
+ */
+function assertSourceRevisionConsistency(
+  repositoryId: string,
+  expectedCommitSha: string,
+  indexedFiles: InsertIndexFileInput[],
+  indexedChunks: InsertCodeChunkInput[],
+): void {
+  const mismatchedFile = indexedFiles.find((f) => f.commitSha !== expectedCommitSha);
+  const mismatchedChunk = mismatchedFile ? undefined : indexedChunks.find((c) => c.commitSha !== expectedCommitSha);
+  const mismatched = mismatchedFile ?? mismatchedChunk;
+  if (!mismatched) return;
+
+  const diagnostic: RepositoryFixRevisionMismatchDiagnostic = {
+    repositoryId,
+    expectedCommitSha,
+    indexedCommitSha: mismatched.commitSha,
+    filePath: mismatched.filePath,
+  };
+  console.error(JSON.stringify({ event: 'repository_finding_fix_source_revision_mismatch', ...diagnostic }));
+  throw new FindingFixError(
+    `Indexed content for this repository does not all agree on the same commit (expected ${expectedCommitSha}, found ${mismatched.commitSha}) — refusing to build a fix proposal from an inconsistent revision.`,
+    'SOURCE_REVISION_MISMATCH',
+    diagnostic,
+  );
 }
 
 /** Maps every SearchError code Phase 5/9 can throw onto RepositoryFixProposalErrorCode — the same reuse discipline as Phase 9's mapSearchErrorCode: never re-implements validation/embedding/vector-search/degraded-mode logic, only relabels the shared failure taxonomy. */
@@ -103,6 +159,9 @@ interface ValidationOk {
 interface ValidationFailure {
   ok: false;
   error: string;
+  /** Set only for the grounding-specific rejection below — every other failure keeps using the generic PROPOSAL_INVALID code the caller already defaults to. */
+  code?: 'PROPOSAL_UNGROUNDED';
+  diagnostic?: RepositoryFixGroundingDiagnostic;
 }
 
 /**
@@ -111,11 +170,19 @@ interface ValidationFailure {
  * validateFixProposal() checklist, adapted for the structured-hunk shape
  * this task uses instead of unified-diff text (see the Phase 10 report's
  * proposal-validation section for the full checklist).
+ *
+ * `commitSha` is used ONLY to label the diagnostic attached to a
+ * PROPOSAL_UNGROUNDED rejection — it plays no role in the pass/fail
+ * decision itself (that remains purely a function of the proposal vs.
+ * indexedFiles/indexedChunks, unchanged). Defaults to '' so every existing
+ * caller/test that doesn't care about the diagnostic keeps compiling
+ * unchanged.
  */
 export function validateFindingFixProposal(
   changes: FindingFixProviderChange[],
   indexedFiles: InsertIndexFileInput[],
   indexedChunks: InsertCodeChunkInput[],
+  commitSha = '',
 ): ValidationOk | ValidationFailure {
   if (changes.length === 0) {
     return { ok: false, error: 'The proposal reported status PROPOSED but contains no file changes.' };
@@ -179,7 +246,7 @@ export function validateFindingFixProposal(
     const normalizedKnownContent = normalizeLineEndings(knownContent).normalized;
 
     const validatedHunks: ValidatedFindingHunk[] = [];
-    for (const hunk of rawHunks) {
+    for (const [hunkIndex, hunk] of rawHunks.entries()) {
       const startLine = Number(hunk.startLine);
       const endLine = Number(hunk.endLine);
       if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
@@ -202,7 +269,26 @@ export function validateFindingFixProposal(
       // silent bypass.
       const normalizedOldText = normalizeLineEndings(hunk.oldText).normalized.trim();
       if (chunksForFile.length > 0 && !normalizedKnownContent.includes(normalizedOldText)) {
-        return { ok: false, error: `Path "${filePath}" has a hunk whose oldText does not match the indexed content — proposal rejected as ungrounded.` };
+        const diagnostic: RepositoryFixGroundingDiagnostic = {
+          filePath,
+          commitSha,
+          hunkIndex,
+          reportedStartLine: startLine,
+          reportedEndLine: endLine,
+          oldTextHash: computeContentHash(normalizedOldText),
+          indexedContentHash: computeContentHash(normalizedKnownContent),
+        };
+        // Structured, secret-free diagnostic — hashes and metadata only,
+        // never the raw oldText or indexed content itself. Logged here
+        // (not just returned) so a rejection is diagnosable from server
+        // logs even when the client never surfaces the diagnostic field.
+        console.error(JSON.stringify({ event: 'repository_finding_fix_proposal_ungrounded', ...diagnostic }));
+        return {
+          ok: false,
+          code: 'PROPOSAL_UNGROUNDED',
+          diagnostic,
+          error: `Path "${filePath}" has a hunk whose oldText does not match the indexed content — proposal rejected as ungrounded.`,
+        };
       }
       validatedHunks.push({ startLine, endLine, oldText: hunk.oldText, newText: hunk.newText });
     }
@@ -250,6 +336,7 @@ export interface FindingFixResponse {
   candidateCount: number;
   reranked: boolean;
   model?: string;
+  sourceGrounding?: RepositoryFixSourceGrounding;
 }
 
 function toHunkContract(hunk: ValidatedFindingHunk): RepositoryFixProposalHunk {
@@ -325,6 +412,7 @@ export async function proposeFindingFix(
     const indexJob = await stores.indexStore.getLatestForCommitAsync(repository!.id, searchResponse.commitSha);
     indexedFiles = indexJob ? await stores.indexStore.getFilesForJobAsync(indexJob.jobId) : [];
     indexedChunks = indexJob ? await stores.indexStore.getChunksForJobAsync(indexJob.jobId) : [];
+    assertSourceRevisionConsistency(repository!.id, searchResponse.commitSha, indexedFiles, indexedChunks);
     const fullContentByChunkId = new Map(indexedChunks.map((c) => [c.id, c.content]));
 
     const contextChunks = searchResponse.results.map((r) => ({
@@ -353,13 +441,31 @@ export async function proposeFindingFix(
   let responseStatus: 'PROPOSED' | 'INSUFFICIENT_EVIDENCE' = aiResult.status;
   let changes: RepositoryFixProposalFileChange[] = [];
   let summary = aiResult.summary;
+  let sourceGrounding: RepositoryFixSourceGrounding | undefined;
 
   if (aiResult.status === 'PROPOSED') {
-    const validation = validateFindingFixProposal(aiResult.changes, indexedFiles, indexedChunks);
+    const validation = validateFindingFixProposal(aiResult.changes, indexedFiles, indexedChunks, searchResponse.commitSha);
     if (!validation.ok) {
-      throw new FindingFixError(validation.error, 'PROPOSAL_INVALID');
+      throw new FindingFixError(validation.error, validation.code ?? 'PROPOSAL_INVALID', validation.diagnostic);
     }
     changes = validation.changes.map((c) => ({ filePath: c.filePath, language: c.language, hunks: c.hunks.map(toHunkContract) }));
+
+    // Independent, deterministic check that the file(s) this fix actually
+    // changes correspond to the flagged DOM element — RAG retrieval can be
+    // syntactically valid, grounded (oldText matches real indexed content),
+    // and still have matched a similar-but-wrong component (see the
+    // source-grounding investigation report). Reuses the already-fetched
+    // search-result chunk content — no new retrieval/embedding/reranker call.
+    const evidenceTokens = extractEvidenceTokens(finding.evidence);
+    const selectedFilePaths = new Set(validation.changes.map((c) => c.filePath));
+    const selectedChunkText = searchResponse.results.filter((r) => selectedFilePaths.has(r.filePath)).map((r) => r.content ?? '').join('\n');
+    const selectedOldText = validation.changes.flatMap((c) => c.hunks.map((h) => h.oldText)).join('\n');
+    const selectedCorrelation = correlateEvidenceWithText(evidenceTokens, `${selectedChunkText}\n${selectedOldText}`);
+    const bestAlternative = searchResponse.results
+      .filter((r) => !selectedFilePaths.has(r.filePath))
+      .map((r) => correlateEvidenceWithText(evidenceTokens, r.content ?? ''))
+      .sort((a, b) => b.score - a.score)[0];
+    sourceGrounding = deriveFixSourceGrounding(evidenceTokens.hasAny, selectedCorrelation, bestAlternative);
   } else {
     // Model itself reported INSUFFICIENT_EVIDENCE — no changes to validate,
     // and sources are cleared too: nothing was actually used to ground a
@@ -378,6 +484,6 @@ export async function proposeFindingFix(
   return {
     repositoryId: repository!.id, findingId: finding.id, commitSha: searchResponse.commitSha, status: responseStatus,
     summary, reasoning: aiResult.reasoning, changes, sources, candidateCount: searchResponse.candidateCount,
-    reranked: searchResponse.reranked, model: aiResult.model,
+    reranked: searchResponse.reranked, model: aiResult.model, sourceGrounding,
   };
 }

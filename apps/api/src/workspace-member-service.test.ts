@@ -31,6 +31,7 @@ function buildFakes(opts: {
   memberships?: Record<string, OrganizationRole>;
   ownerCount?: number;
   orgName?: string;
+  seatCapacity?: { allowed: boolean; limit: number | null; used: number };
 } = {}): Fakes {
   const addCalls: Fakes['addCalls'] = [];
   const removeCalls: string[] = [];
@@ -68,6 +69,7 @@ function buildFakes(opts: {
       getById: async (organizationId) => ({ id: organizationId, name: opts.orgName ?? 'Test Org' }),
     },
     getPlan: async () => opts.plan ?? 'TEAM',
+    checkSeatCapacity: async () => opts.seatCapacity ?? { allowed: true, limit: null, used: 0 },
     auditLog: { record: async (input) => { auditCalls.push(input); } },
     sendWorkspaceMemberAddedEmail: async (to, data) => { memberAddedEmails.push({ to, workspaceName: data.workspaceName, role: data.role }); },
     sendWorkspaceMemberRemovedEmail: async (to, data) => { memberRemovedEmails.push({ to, workspaceName: data.workspaceName }); },
@@ -88,6 +90,22 @@ describe('addWorkspaceMemberByEmail', () => {
     assert.equal(result.role, 'MEMBER');
     assert.deepEqual(addCalls, [{ organizationId: 'org-1', userId: 'alice', role: 'MEMBER' }]);
     assert.equal(auditCalls.length, 1);
+  });
+
+  it('bugfix (Agency seat cap): rejects adding a non-CLIENT_VIEWER member once the hard seat cap is reached', async () => {
+    const alice = fakeUser('alice', 'alice@example.com');
+    const { deps } = buildFakes({ users: { alice }, plan: 'AGENCY', seatCapacity: { allowed: false, limit: 15, used: 15 } });
+    await assert.rejects(
+      () => addWorkspaceMemberByEmail(deps, 'org-1', 'owner-1', 'alice@example.com', 'MEMBER'),
+      (error: unknown) => { assert.ok(error instanceof WorkspaceMemberError); assert.equal(error.code, 'SEAT_LIMIT_REACHED'); return true; },
+    );
+  });
+
+  it('bugfix (Agency seat cap): a CLIENT_VIEWER is NEVER checked against the seat cap, even when it is reached', async () => {
+    const alice = fakeUser('alice', 'alice@example.com');
+    const { deps, addCalls } = buildFakes({ users: { alice }, plan: 'AGENCY', seatCapacity: { allowed: false, limit: 15, used: 15 } });
+    await addWorkspaceMemberByEmail(deps, 'org-1', 'owner-1', 'alice@example.com', 'CLIENT_VIEWER');
+    assert.equal(addCalls.length, 1);
   });
 
   it('sends a best-effort workspace-member-added email to the new member', async () => {

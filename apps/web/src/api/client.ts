@@ -11,15 +11,22 @@ import type {
   IssueFilters,
   IssueSource,
   IssueStatus,
+  PageAskResponse,
   PageScanRecord,
   Repository,
+  ResponsiveTestResult,
+  VisualComparisonResult,
   RepositoryAskResponse,
   RepositoryCloneStatus,
   RepositoryEmbeddingStatus,
   RepositoryFixApproveResponse,
+  RepositoryFixGroundingDiagnostic,
   RepositoryFixProposal,
   RepositoryFixProposalResponse,
+  RepositoryFixRevisionMismatchDiagnostic,
   RepositoryFixReviewResponse,
+  RepositoryFixSyntaxErrorDetail,
+  RepositoryPrStrategyPreviewResponse,
   RepositoryIndexStatus,
   RepositoryIssue,
   RepositoryIssueAnalysis,
@@ -35,6 +42,13 @@ import type {
   CreateReportShareResponse,
   ReportShareStatusResponse,
   LensReport,
+  CreateMonitoredSiteRequest,
+  ListMonitoredSitesResponse,
+  MonitoredSite,
+  MonitoredSiteDetail,
+  MonitoringAskResponse,
+  RunMonitoredSiteScanResponse,
+  UpdateMonitoredSiteRequest,
 } from '@origami/contracts';
 import { CODE_TARGET_META } from '@origami/contracts';
 import type {
@@ -90,9 +104,14 @@ const API_BASE = import.meta.env.VITE_API_URL ?? '/api';
 // apps/web/vite.config.ts's separate /auth proxy entry.
 const AUTH_BASE = import.meta.env.VITE_API_URL ?? '';
 
-/** Same shape as a plain Error everywhere it's caught today (only `.message` was ever read) — `.code` is additive, for callers (like repository search) that need to branch on the server's errorCode rather than just display the message. */
+/** Same shape as a plain Error everywhere it's caught today (only `.message` was ever read) — `.code` is additive, for callers (like repository search) that need to branch on the server's errorCode rather than just display the message. `.syntaxError` is additive too — set only for a SYNTAX_VALIDATION_FAILED fix-review/apply failure, so that one caller can render the real parser's file/line/column instead of just the message string. `.diagnostic` is set only for a PROPOSAL_UNGROUNDED or SOURCE_REVISION_MISMATCH fix-proposal failure — hashes/metadata only, never raw source, safe to render. */
 export class ApiRequestError extends Error {
-  constructor(message: string, public readonly code?: string) {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly syntaxError?: RepositoryFixSyntaxErrorDetail,
+    public readonly diagnostic?: RepositoryFixGroundingDiagnostic | RepositoryFixRevisionMismatchDiagnostic,
+  ) {
     super(message);
     this.name = 'ApiRequestError';
   }
@@ -122,14 +141,19 @@ async function request<T>(path: string, init?: ApiRequestInit): Promise<T> {
     throw new ApiRequestError('Unable to reach the server. Check your connection and try again.', 'NETWORK_ERROR');
   }
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as { error?: string; errorCode?: string };
+    const err = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      errorCode?: string;
+      syntaxError?: RepositoryFixSyntaxErrorDetail;
+      diagnostic?: RepositoryFixGroundingDiagnostic | RepositoryFixRevisionMismatchDiagnostic;
+    };
     if (res.status === 401 || err.errorCode === 'UNAUTHENTICATED') {
       notifyApiError({ status: res.status, code: err.errorCode, serverMessage: err.error });
       redirectToLoginOn401();
     } else if (!silent) {
       notifyApiError({ status: res.status, code: err.errorCode, serverMessage: err.error });
     }
-    throw new ApiRequestError(err.error ?? `Request failed (${res.status})`, err.errorCode);
+    throw new ApiRequestError(err.error ?? `Request failed (${res.status})`, err.errorCode, err.syntaxError, err.diagnostic);
   }
   return res.json() as Promise<T>;
 }
@@ -191,9 +215,9 @@ export function getReportShareStatus(scanId: string) {
   return request<ReportShareStatusResponse>(`/scans/${scanId}/report/share`);
 }
 
-/** Always rotates — see report-share-service.ts's doc comment for why a previously issued link can never be re-displayed (only its hash is stored). */
-export function createOrRotateReportShare(scanId: string) {
-  return request<CreateReportShareResponse>(`/scans/${scanId}/report/share`, { method: 'POST', body: JSON.stringify({}) });
+/** Always rotates — see report-share-service.ts's doc comment for why a previously issued link can never be re-displayed (only its hash is stored). expiresInDays (Agency plan, V4) is optional — omitted keeps the existing "valid until revoked" behavior. */
+export function createOrRotateReportShare(scanId: string, expiresInDays?: number) {
+  return request<CreateReportShareResponse>(`/scans/${scanId}/report/share`, { method: 'POST', body: JSON.stringify({ expiresInDays }) });
 }
 
 export function revokeReportShare(scanId: string) {
@@ -213,6 +237,91 @@ export function fetchPageScanDetail(scanId: string, pageScanId: string) {
   return request<{ scanId: string; page: PageScanRecord; issues: Issue[] }>(
     `/scans/${scanId}/pages/${pageScanId}`,
   );
+}
+
+/**
+ * "Ask About This Page" for a CURRENT_PAGE scan — grounded in that scan's
+ * own persisted, privacy-scrubbed evidence (migration 036), never live
+ * browser evidence. Distinct from askAi() above, which is issue-scoped and
+ * live-evidence-based (POST /ai/ask).
+ */
+export function askAboutScan(scanId: string, question: string) {
+  return request<PageAskResponse>(`/scans/${scanId}/ask`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+}
+
+/** Same as askAboutScan above, for one page of a WEBSITE scan. */
+export function askAboutPageScan(scanId: string, pageScanId: string, question: string) {
+  return request<PageAskResponse>(`/scans/${scanId}/pages/${pageScanId}/ask`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+}
+
+/** Automatic Responsive Testing (roadmap Phase 4) — an on-demand check, not a persisted scan. Omit `widths` for the default breakpoint set (375/390/430/768/1024/desktop). */
+export function runResponsiveTest(url: string, widths?: number[]) {
+  return request<ResponsiveTestResult>('/responsive-test', {
+    method: 'POST',
+    body: JSON.stringify({ url, widths }),
+  });
+}
+
+/** Origami Lead Generation — "Talk to Origami" (roadmap Phase 8). scanId is automatic context; domain/Health Score/issue counts are derived server-side from it, never sent from here. isProspectAudit (Agency plan, V4) is silently downgraded server-side for any non-Agency organization. */
+export function submitLead(input: { name: string; email: string; company?: string; message?: string; scanId?: string; isProspectAudit?: boolean }) {
+  return request<import('@origami/contracts').CreateLeadResponse>('/leads', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/**
+ * Create GitHub Issue (roadmap Phase 7) — DISTINCT from Fix with AI/Create
+ * Pull Request: never creates a branch/commit/PR. Preview first (no GitHub
+ * side effects), then create only on explicit confirmation. `silent` is
+ * passed by the in-context setup modal (CreateGitHubIssueModal.tsx), which
+ * renders its own well-crafted state for GITHUB_AUTH_NOT_CONFIGURED/
+ * GITHUB_PERMISSION_DENIED — without it, the global API-error toast would
+ * ALSO fire for an entirely expected "needs setup" response.
+ */
+export function fetchGitHubIssuePreview(issueId: string, repositoryId: string, opts?: { silent?: boolean }) {
+  return request<import('@origami/contracts').GitHubIssuePreview>(
+    `/issues/${issueId}/github-issue-preview?repositoryId=${encodeURIComponent(repositoryId)}`,
+    { silent: opts?.silent },
+  );
+}
+
+export function createGitHubIssue(issueId: string, repositoryId: string, edited: { title: string; body: string; labels: string[] }, opts?: { silent?: boolean }) {
+  return request<import('@origami/contracts').CreateGitHubIssueResponse>(`/issues/${issueId}/create-github-issue`, {
+    method: 'POST',
+    body: JSON.stringify({ repositoryId, ...edited }),
+    silent: opts?.silent,
+  });
+}
+
+/** Create Bug Report — fetches the already-created, already-scrubbed record (apps/web never builds one client-side). */
+export function fetchBugReport(id: string) {
+  return request<import('@origami/contracts').BugReport>(`/bug-reports/${id}`);
+}
+
+/** Reuses the SAME GitHub credential/permission chain as Create GitHub Issue (a scan finding) — just a different source record. */
+export function createGitHubIssueFromBugReport(id: string, repositoryId: string) {
+  return request<import('@origami/contracts').CreateGitHubIssueResponse>(`/bug-reports/${id}/create-github-issue`, {
+    method: 'POST',
+    body: JSON.stringify({ repositoryId }),
+  });
+}
+
+/** Visual Comparison (roadmap Phase 5) — compares two existing scans' screenshots for the same viewport (storageKey is always "desktop.jpg" or "mobile.jpg" — see artifact-store.ts). */
+export function compareScanScreenshots(beforeScanId: string, afterScanId: string, viewport: 'desktop' | 'mobile') {
+  return request<VisualComparisonResult>('/visual-comparison', {
+    method: 'POST',
+    body: JSON.stringify({
+      beforeScanId, beforeArtifactKey: `${viewport}.jpg`,
+      afterScanId, afterArtifactKey: `${viewport}.jpg`,
+    }),
+  });
 }
 
 export function fetchScanIssues(scanId: string, filters: IssueFilters) {
@@ -336,8 +445,9 @@ export function cloneRepository(id: string) {
   });
 }
 
+/** `silent: true` — polled repeatedly (every few seconds while in progress) and a 404 ("no clone job yet") is a completely normal state for a freshly-connected repository, not an error; RepositoryDetailPage already renders its own calm "Not started" pipeline card for this via its own try/catch. Without `silent`, every poll tick would fire a global "Something went wrong" toast for what isn't a problem at all — and would keep firing every interval for a genuine transient failure too. */
 export function fetchCloneStatus(id: string) {
-  return request<RepositoryCloneStatusResponse>(`/repositories/${id}/clone-status`);
+  return request<RepositoryCloneStatusResponse>(`/repositories/${id}/clone-status`, { silent: true });
 }
 
 export function cancelRepositoryClone(id: string) {
@@ -379,12 +489,13 @@ export function indexRepository(id: string) {
   });
 }
 
+/** `silent: true` — see fetchCloneStatus's doc comment; same polling/"not started yet is normal" reasoning applies identically here. */
 export function fetchIndexStatus(id: string) {
-  return request<RepositoryIndexStatusResponse>(`/repositories/${id}/index-status`);
+  return request<RepositoryIndexStatusResponse>(`/repositories/${id}/index-status`, { silent: true });
 }
 
 export function fetchIndexSummary(id: string) {
-  return request<RepositoryIndexSummaryResponse>(`/repositories/${id}/index-summary`);
+  return request<RepositoryIndexSummaryResponse>(`/repositories/${id}/index-summary`, { silent: true });
 }
 
 export function cancelRepositoryIndex(id: string) {
@@ -418,8 +529,9 @@ export function embedRepository(id: string) {
   });
 }
 
+/** `silent: true` — see fetchCloneStatus's doc comment; same polling/"not started yet is normal" reasoning applies identically here. */
 export function fetchEmbedStatus(id: string) {
-  return request<RepositoryEmbeddingStatusResponse>(`/repositories/${id}/embed-status`);
+  return request<RepositoryEmbeddingStatusResponse>(`/repositories/${id}/embed-status`, { silent: true });
 }
 
 export function cancelRepositoryEmbedding(id: string) {
@@ -466,6 +578,11 @@ export function approveRepositoryFindingFix(repositoryId: string, findingId: str
     method: 'POST',
     body: JSON.stringify({ applicationId, proposal }),
   });
+}
+
+/** Read-only preview of which PR strategy an approval would use for this repository, resolved for the current user — never creates a fork/branch/commit/PR itself. */
+export function fetchRepositoryPrStrategy(repositoryId: string, opts?: { silent?: boolean }) {
+  return request<RepositoryPrStrategyPreviewResponse>(`/repositories/${repositoryId}/pr-strategy`, { silent: opts?.silent });
 }
 
 /** Phase 8 — repository issue detection + AI fix proposal + reviewable diff. */
@@ -851,9 +968,23 @@ export async function setPersona(persona: Persona): Promise<AuthMeResponse> {
 /* only connection status/account-login metadata (ProviderConnectionSummary). */
 /* -------------------------------------------------------------------- */
 
-/** Full-page navigation — GitHub's App installation flow requires a real top-level browser navigation. */
-export function githubConnectUrl(): string {
-  return `${AUTH_BASE}/providers/github/connect`;
+/**
+ * Full-page navigation — GitHub's App installation flow requires a real
+ * top-level browser navigation. `returnTo` (a same-origin path, e.g.
+ * `${location.pathname}${location.search}`) brings the user back to the
+ * exact page/modal they started from instead of the dashboard root — used
+ * by the Create GitHub Issue setup modal so authorizing GitHub never
+ * permanently navigates the user away from the Issue Detail page.
+ */
+export function githubConnectUrl(returnTo?: string): string {
+  const url = `${AUTH_BASE}/providers/github/connect`;
+  return returnTo ? `${url}?returnTo=${encodeURIComponent(returnTo)}` : url;
+}
+
+/** Full-page navigation — a SEPARATE OAuth flow from githubConnectUrl (the App install), for direct push/fork access to a company repo where an admin never installed the App. See resolvePrStrategy. `returnTo` — see githubConnectUrl's doc comment. */
+export function githubPushConnectUrl(returnTo?: string): string {
+  const url = `${AUTH_BASE}/providers/github/push/connect`;
+  return returnTo ? `${url}?returnTo=${encodeURIComponent(returnTo)}` : url;
 }
 
 /** Full-page navigation — GitLab's OAuth authorization flow requires a real top-level browser navigation. */
@@ -884,4 +1015,68 @@ export async function disconnectProvider(connectionId: string): Promise<Disconne
   const res = await fetch(`${AUTH_BASE}/providers/connections/${encodeURIComponent(connectionId)}`, { method: 'DELETE', credentials: 'include' });
   if (!res.ok) return { ok: false };
   return res.json() as Promise<DisconnectProviderResult>;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Continuous Website Monitoring (V3)                                      */
+/* ------------------------------------------------------------------------ */
+
+export function fetchMonitoredSites() {
+  return request<ListMonitoredSitesResponse>('/monitored-sites');
+}
+
+export function fetchMonitoredSite(id: string) {
+  return request<MonitoredSiteDetail>(`/monitored-sites/${id}`);
+}
+
+export function createMonitoredSite(input: CreateMonitoredSiteRequest) {
+  return request<MonitoredSite>('/monitored-sites', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateMonitoredSite(id: string, input: UpdateMonitoredSiteRequest) {
+  return request<MonitoredSite>(`/monitored-sites/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+}
+
+export function deleteMonitoredSite(id: string) {
+  return request<{ ok: true }>(`/monitored-sites/${id}`, { method: 'DELETE', body: JSON.stringify({}) });
+}
+
+export function runMonitoredSiteNow(id: string) {
+  return request<RunMonitoredSiteScanResponse>(`/monitored-sites/${id}/run`, { method: 'POST', body: JSON.stringify({}) });
+}
+
+export function pauseMonitoredSite(id: string) {
+  return request<MonitoredSite>(`/monitored-sites/${id}/pause`, { method: 'POST', body: JSON.stringify({}) });
+}
+
+export function resumeMonitoredSite(id: string) {
+  return request<MonitoredSite>(`/monitored-sites/${id}/resume`, { method: 'POST', body: JSON.stringify({}) });
+}
+
+export function askAboutMonitoringRegression(id: string, question?: string, opts?: { silent?: boolean }) {
+  return request<MonitoringAskResponse>(`/monitored-sites/${id}/ask`, { method: 'POST', body: JSON.stringify({ question }), silent: opts?.silent });
+}
+
+/* ------------------------------------------------------------------------ */
+/* Agency plan (V4)                                                        */
+/* ------------------------------------------------------------------------ */
+
+export function fetchClientWorkspaces() {
+  return request<{ clients: import('@origami/contracts').ClientWorkspaceSummary[] }>('/organizations/clients');
+}
+
+export function createClientWorkspace(input: import('@origami/contracts').CreateClientWorkspaceRequest) {
+  return request<import('@origami/contracts').Organization>('/organizations/clients', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function fetchAgencyBranding() {
+  return request<import('@origami/contracts').AgencyBranding>('/agency/branding');
+}
+
+export function updateAgencyBranding(input: import('@origami/contracts').UpdateAgencyBrandingRequest) {
+  return request<import('@origami/contracts').AgencyBranding>('/agency/branding', { method: 'PUT', body: JSON.stringify(input) });
+}
+
+export function uploadAgencyLogo(contentType: string, base64: string) {
+  return request<import('@origami/contracts').AgencyBranding>('/agency/branding/logo', { method: 'POST', body: JSON.stringify({ contentType, base64 }) });
 }

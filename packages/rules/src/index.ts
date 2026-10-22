@@ -97,6 +97,20 @@ export const RULE_DEFINITIONS: RuleDefinition[] = [
     suggestedFix: 'Adjust layout and positioning for the target viewport size.',
   },
   {
+    ruleId: 'VIS_OVERLAPPING_ELEMENTS',
+    category: 'visualMobile',
+    severity: 'MEDIUM',
+    confidence: 0.7,
+    impact: 'Overlapping navigation/branding elements can hide content or make controls unreachable.',
+    title: 'Overlapping elements',
+    description: 'Two prominent navigation/header elements visually overlap at this viewport (e.g. navigation overlapping a logo).',
+    type: 'OVERLAPPING_ELEMENTS',
+    source: 'playwright',
+    problem: 'Two elements render on top of each other at this viewport width.',
+    cause: 'A responsive breakpoint for this layout is missing or the elements are not repositioned/hidden at this width.',
+    suggestedFix: 'Add a layout rule (flex-wrap, a collapsed nav, or repositioning) for this breakpoint so the elements no longer overlap.',
+  },
+  {
     ruleId: 'VIS_TINY_TOUCH_TARGET',
     category: 'visualMobile',
     severity: 'LOW',
@@ -356,6 +370,14 @@ export function runOrigamiRules(evidence: BrowserEvidence): RuleMatch[] {
     matches.push({
       rule: getRule('VIS_ELEMENT_OUTSIDE_VIEWPORT'),
       evidence: { selector: el.selector, boundingBox: el.boundingBox },
+    });
+  }
+
+  // Visual: overlapping prominent nav/header/logo elements
+  for (const el of (evidence.layout.overlappingElements ?? []).slice(0, 10)) {
+    matches.push({
+      rule: getRule('VIS_OVERLAPPING_ELEMENTS'),
+      evidence: { selector: el.selector, boundingBox: el.boundingBox, viewport: evidence.viewport },
     });
   }
 
